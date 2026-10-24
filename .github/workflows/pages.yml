@@ -2,6 +2,7 @@
 #   https://<you>.github.io/<repo>/
 # One-time: repo Settings > Pages > Source: "GitHub Actions".
 name: Web app (GitHub Pages)
+# Served at https://josejoshy2007-spec.github.io/marginalia/
 
 on:
   push:

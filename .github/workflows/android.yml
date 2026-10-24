@@ -2,6 +2,7 @@
 # Every push to main publishes it as a GitHub Release; the newest is always at
 #   https://github.com/<you>/<repo>/releases/latest/download/marginalia.apk
 name: Android APK
+# Signed with the release key from repo secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD.
 
 on:
   push:
