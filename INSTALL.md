@@ -19,7 +19,7 @@ There are two ways to get it, both free:
    - Don't add a README.
 2. **Push the code.** From the `Study tool` folder:
    ```bash
-   git remote add origin https://github.com/YOUR-USERNAME/marginalia.git
+   git remote add origin https://github.com/josejoshy2007-spec/marginalia.git
    git push -u origin main
    ```
    The first push opens a browser window to sign in to GitHub.
@@ -39,7 +39,7 @@ There are two ways to get it, both free:
 ## Install the APK on your phone
 
 1. On the phone, open
-   `https://github.com/YOUR-USERNAME/marginalia/releases/latest/download/marginalia.apk`.
+   `https://github.com/josejoshy2007-spec/marginalia/releases/latest/download/marginalia.apk`.
    You can also go to the repo's **Releases** page and tap `marginalia.apk`.
 2. Chrome warns that the file can harm your device. Tap **Download anyway**.
 3. Open the downloaded file. Android asks to **allow installs from this source** (Chrome or Files).
@@ -56,7 +56,7 @@ over the old app. Your data stays.
 
 ## Or install the web app (PWA)
 
-Open `https://YOUR-USERNAME.github.io/marginalia/` in Chrome on the phone, then tap
+Open `https://josejoshy2007-spec.github.io/marginalia/` in Chrome on the phone, then tap
 **⋮ → Install app** (or **Add to Home screen**). The PWA is a separate install from the APK with its
 own storage. Reminders and the native camera sheet only work in the APK.
 
