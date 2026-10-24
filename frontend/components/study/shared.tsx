@@ -40,7 +40,7 @@ export function CiteMarks({
             e.stopPropagation();
             onCite(c);
           }}
-          title={`${c.source_title}${c.page ? ` · p. ${c.page}` : ""}\n“${c.cited_text.slice(0, 160)}”`}
+          title={`${c.source_title}${c.page ? ` · ${c.page_label ?? "p."} ${c.page}` : ""}\n“${c.cited_text.slice(0, 160)}”`}
         >
           {(cite ?? [])[i]}
         </button>

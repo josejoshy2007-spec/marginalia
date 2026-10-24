@@ -119,6 +119,14 @@ The app needs its own Google sign-in "client ID". Do this on a computer, signed 
 While the app is in "Testing" mode, only the test users from step 3 can sign in. Google may show
 "Google hasn't verified this app". Tap **Continue**; it's your own app.
 
+## What you can add
+
+PDFs, PowerPoint (.pptx), Word (.docx), Excel (.xlsx) and CSV, OpenDocument (.odp/.odt/.ods), EPUB
+books, text/Markdown/HTML files, photos of notes or slides, web links, YouTube videos and lecture
+recordings. Slides and sheets are numbered in citations ("slide 4", "sheet 2"). Old-style .ppt/.doc/.xls
+files must be saved as .pptx/.docx/.xlsx first (PowerPoint/Word/Excel, or Google Slides/Docs/Sheets:
+File → Download). Photos are read by Gemini, so they use a little quota.
+
 ## Things to know
 
 - **Free Gemini quota is small.** The main model allows roughly 20 requests a day on the free tier;

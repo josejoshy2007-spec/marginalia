@@ -5,6 +5,7 @@
  */
 import { db, type ChunkRow, type Citation, type SourceRow } from "./db";
 import { embed } from "./gemini";
+import { pageLabel } from "../api";
 
 export type Retrieved = { chunk: ChunkRow; source: SourceRow; score: number };
 
@@ -114,11 +115,12 @@ export function citation(r: Retrieved): Citation {
     end: r.chunk.char_end,
     page: r.chunk.page_start,
     cited_text: r.chunk.text.slice(0, 240),
+    page_label: pageLabel(r.source.kind).short,
   };
 }
 
 export function passageBlock(n: number, r: Retrieved): string {
-  const where = r.chunk.page_start ? `, p. ${r.chunk.page_start}` : "";
+  const where = r.chunk.page_start ? `, ${pageLabel(r.source.kind).short} ${r.chunk.page_start}` : "";
   return `<passage n="${n}" source="${r.source.title}${where}">\n${r.chunk.text}\n</passage>`;
 }
 

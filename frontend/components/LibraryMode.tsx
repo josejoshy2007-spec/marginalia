@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { api, type Citation, type Source, type Subject } from "@/lib/api";
+import { api, ENGINE, KIND_LABEL, pageLabel, type Citation, type Source, type Subject } from "@/lib/api";
 import { FileIcon, LinkIcon, MicIcon, NoteIcon, PlusIcon, TrashIcon } from "./icons";
 import SheetsPanel from "./SheetsPanel";
 import { ErrorNote, Segmented } from "./study/shared";
@@ -22,7 +22,12 @@ type Props = {
 
 /** The shelf is split by medium: things you read vs. things you listen to. */
 const SHELF_SECTIONS: { title: string; blurb: string; Icon: typeof FileIcon; kinds: Source["kind"][] }[] = [
-  { title: "Documents", blurb: "PDFs, notes and web pages", Icon: FileIcon, kinds: ["pdf", "text", "url"] },
+  {
+    title: "Documents",
+    blurb: "PDFs, slides, documents, spreadsheets, notes and web pages",
+    Icon: FileIcon,
+    kinds: ["pdf", "slides", "doc", "sheet", "image", "text", "url"],
+  },
   { title: "Audio", blurb: "Lecture recordings and videos, as transcripts", Icon: MicIcon, kinds: ["audio", "video"] },
 ];
 
@@ -229,19 +234,15 @@ function AddSource({ subjectId, onAdded }: { subjectId: number; onAdded: () => P
 
   const uploadFiles = async (files: FileList | File[]) => {
     for (const f of Array.from(files)) {
-      if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") {
-        setError(`${f.name} isn't a PDF`);
-        continue;
-      }
       const mb = (f.size / 1024 / 1024).toFixed(f.size > 10 * 1024 * 1024 ? 0 : 1);
-      await run(`Uploading ${f.name} (${mb} MB)…`, () =>
-        api.addPdf(subjectId, f, (frac) => setBusy(`Uploading ${f.name} (${mb} MB)… ${Math.round(frac * 100)}%`)),
+      await run(`Adding ${f.name} (${mb} MB)…`, () =>
+        api.addFile(subjectId, f, (frac) => setBusy(`Adding ${f.name} (${mb} MB)… ${Math.round(frac * 100)}%`)),
       );
     }
   };
 
   const tabs: { id: Tab; label: string; Icon: typeof FileIcon }[] = [
-    { id: "pdf", label: "PDF", Icon: FileIcon },
+    { id: "pdf", label: "File", Icon: FileIcon },
     { id: "text", label: "Paste text", Icon: NoteIcon },
     { id: "url", label: "Link or YouTube", Icon: LinkIcon },
     { id: "audio", label: "Lecture audio", Icon: MicIcon },
@@ -283,12 +284,23 @@ function AddSource({ subjectId, onAdded }: { subjectId: number; onAdded: () => P
               drag ? "border-accent bg-accent-soft" : "border-line hover:border-muted"
             }`}
           >
-            <p className="font-medium"><span className="hidden sm:inline">Drop PDFs here or click to choose</span><span className="sm:hidden">Tap to choose a PDF</span></p>
-            <p className="mt-1 text-sm text-muted">Textbooks up to 600 MB. Big files are read in the background; page numbers are kept for citations.</p>
+            <p className="font-medium">
+              <span className="hidden sm:inline">Drop files here or click to choose</span>
+              <span className="sm:hidden">Tap to choose files</span>
+            </p>
+            <p className="mt-1 text-sm text-muted">
+              {ENGINE === "local"
+                ? "PDF, PowerPoint, Word, Excel or CSV, EPUB, text files, or photos of notes. Pages and slide numbers are kept for citations."
+                : "PDF textbooks up to 600 MB. Other file types work in the phone and web app."}
+            </p>
             <input
               ref={fileRef}
               type="file"
-              accept="application/pdf,.pdf"
+              accept={
+                ENGINE === "local"
+                  ? ".pdf,.pptx,.ppsx,.potx,.odp,.docx,.dotx,.odt,.xlsx,.xlsm,.ods,.csv,.tsv,.epub,.txt,.md,.rtf,.html,.htm,image/*,application/pdf"
+                  : "application/pdf,.pdf"
+              }
               multiple
               hidden
               onChange={(e) => {
@@ -371,10 +383,12 @@ function AddSource({ subjectId, onAdded }: { subjectId: number; onAdded: () => P
 }
 
 function SourceCard({ source: s, setSources, onSourcesChanged, onOpen }: Props & { source: Source }) {
-  const kindLabel = { pdf: "PDF", text: "Notes", url: "Web", audio: "Lecture", video: "Video" }[s.kind];
+  const kindLabel = KIND_LABEL[s.kind];
   const meta = [
     kindLabel,
-    s.page_count ? `${s.page_count} pp.` : `${Math.max(1, Math.round(s.char_count / 5 / 250))} min read`,
+    s.page_count
+      ? `${s.page_count} ${s.kind === "pdf" ? "pp." : s.page_count === 1 ? pageLabel(s.kind).one : pageLabel(s.kind).many}`
+      : `${Math.max(1, Math.round(s.char_count / 5 / 250))} min read`,
     `${s.chunk_count} passages`,
   ].join(" · ");
   return (

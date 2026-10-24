@@ -17,7 +17,7 @@ export type Subject = {
 export type Source = {
   id: number;
   subject_id: number;
-  kind: "pdf" | "text" | "url" | "audio" | "video";
+  kind: "pdf" | "text" | "url" | "audio" | "video" | "slides" | "doc" | "sheet" | "image";
   title: string;
   url: string | null;
   checked: boolean;
@@ -33,6 +33,20 @@ export type Source = {
 };
 
 export type PageSpan = { page: number; start: number; end: number };
+
+/** Short name of each kind of source, for cards and chips. */
+export const KIND_LABEL: Record<Source["kind"], string> = {
+  pdf: "PDF", text: "Notes", url: "Web", audio: "Lecture", video: "Video",
+  slides: "Slides", doc: "Document", sheet: "Spreadsheet", image: "Photo",
+};
+
+/** What a source's "pages" are: PDF pages, slides, spreadsheet sheets, or sections (EPUB chapters). */
+export function pageLabel(kind: Source["kind"] | undefined): { one: string; many: string; short: string } {
+  if (kind === "slides") return { one: "slide", many: "slides", short: "slide" };
+  if (kind === "sheet") return { one: "sheet", many: "sheets", short: "sheet" };
+  if (kind === "doc") return { one: "section", many: "sections", short: "§" };
+  return { one: "page", many: "pages", short: "p." };
+}
 export type SourceDetail = Source & { text: string; pages: PageSpan[] };
 
 export type Citation = {
@@ -43,6 +57,7 @@ export type Citation = {
   end: number;
   page: number | null;
   cited_text: string;
+  page_label?: string; // "p." | "slide" | "sheet" | "§" (older citations: p.)
 };
 
 export type StreamEvent =
@@ -254,6 +269,11 @@ const serverApi = {
   /** PDFs up to 600 MB; parsed and indexed in the background after upload. */
   addPdf: (subjectId: number, file: File, onUpload?: (fraction: number) => void) =>
     uploadWithProgress<Source>(`/subjects/${subjectId}/sources/pdf`, file, file.name, onUpload),
+  /** The laptop server reads PDFs only; other formats are read by the on-device (phone/web) version. */
+  addFile: (subjectId: number, file: File, onUpload?: (fraction: number) => void) =>
+    /\.pdf$/i.test(file.name) || file.type === "application/pdf"
+      ? uploadWithProgress<Source>(`/subjects/${subjectId}/sources/pdf`, file, file.name, onUpload)
+      : Promise.reject(new Error(`The laptop version only reads PDFs. Add ${file.name} in the phone or web app.`)),
   /** Any audio/video format up to 2 h; transcribed locally by Whisper in the background. */
   addRecording: (subjectId: number, file: Blob, filename: string, onUpload?: (fraction: number) => void) =>
     uploadWithProgress<Source>(`/subjects/${subjectId}/sources/recording`, file, filename, onUpload),

@@ -43,6 +43,7 @@ import { preview, schedule, type Grade } from "./srs";
 import { buildSummary, SUMMARY_FORMATS, SUMMARY_LENGTH } from "./summarize";
 import { readAnswer, readQuestion, readQuizAnswers } from "./vision";
 import { exportAll, importAll } from "./backup";
+import { formatOf, unsupportedReason } from "./formats";
 
 // ---------------------------------------------------------------- jobs
 
@@ -277,15 +278,23 @@ function submitSource(id: number) {
     try {
       let src = await db.sources.get(id);
       if (!src) return;
-      const share = src.kind === "pdf" ? 0.5 : src.kind === "audio" ? 0.9 : 0;
+      const share = src.kind === "pdf" ? 0.5 : src.kind === "audio" ? 0.9 : src.kind === "image" ? 0.6 : 0.15;
       if (!src.text) {
-        const file = (await db.blobs.get(uploadKey(id)))?.blob;
+        const stored = await db.blobs.get(uploadKey(id));
+        const file = stored?.blob;
         if (!file) throw new Error("The uploaded file is gone. Please add it again.");
-        const doc =
-          src.kind === "pdf"
-            ? await parsePdf(file, (f, s) => report(f * share, s))
-            : await transcribeRecording(file, src.title, (f, s) => report(f * share, s));
-        const title = src.kind === "pdf" && doc.title !== "Untitled PDF" ? doc.title : src.title;
+        let doc;
+        if (src.kind === "pdf") doc = await parsePdf(file, (f, s) => report(f * share, s));
+        else if (src.kind === "audio") doc = await transcribeRecording(file, src.title, (f, s) => report(f * share, s));
+        else {
+          const name = stored?.name ?? (file as File).name ?? src.title;
+          const fmt = formatOf(name, file.type);
+          if (!fmt || fmt === "pdf") throw new Error(unsupportedReason(name, file.type) ?? "Unsupported file.");
+          report(0.05, src.kind === "image" ? "Reading the photo with Gemini" : "Reading the file");
+          doc = await fmt.read(file, name);
+        }
+        // PDFs keep their own title if they have one; photos get Gemini's topic title; other files keep the file name.
+        const title = (src.kind === "pdf" && doc.title !== "Untitled PDF") || src.kind === "image" ? doc.title : src.title;
         await db.sources.update(id, { text: doc.text, pages: doc.pages, title: title.slice(0, 500) });
         src = (await db.sources.get(id))!;
       }
@@ -327,7 +336,7 @@ async function addParsed(subjectId: number, kind: SourceRow["kind"], doc: { titl
   return sourceOut(src);
 }
 
-async function addUpload(subjectId: number, kind: "pdf" | "audio", file: Blob, filename: string, onUpload?: (f: number) => void) {
+async function addUpload(subjectId: number, kind: SourceRow["kind"], file: Blob, filename: string, onUpload?: (f: number) => void) {
   const title = filename.replace(/\.[^.]+$/, "").replace(/_/g, " ").trim() || (kind === "pdf" ? "Untitled PDF" : "Lecture recording");
   if (kind === "pdf") {
     const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
@@ -337,7 +346,7 @@ async function addUpload(subjectId: number, kind: "pdf" | "audio", file: Blob, f
   onUpload?.(0.05);
   const src = await newSource(subjectId, { kind, title });
   // Keep a copy so the job survives the app being closed and failures can be retried.
-  await db.blobs.put({ key: uploadKey(src.id!), blob: file });
+  await db.blobs.put({ key: uploadKey(src.id!), blob: file, name: filename });
   onUpload?.(1);
   submitSource(src.id!);
   return sourceOut(src);
@@ -682,6 +691,12 @@ export const localApi = {
     return addParsed(subjectId, "url", await parseUrl(url), url);
   },
   addPdf: (subjectId: number, file: File, onUpload?: (f: number) => void) => addUpload(subjectId, "pdf", file, file.name, onUpload),
+  /** Any supported document: PDF, PowerPoint, Word, Excel/CSV, EPUB, text, HTML or a photo. */
+  addFile: (subjectId: number, file: File, onUpload?: (f: number) => void) => {
+    const fmt = formatOf(file.name, file.type);
+    if (!fmt) return Promise.reject(new Error(unsupportedReason(file.name, file.type) ?? "Unsupported file."));
+    return addUpload(subjectId, fmt === "pdf" ? "pdf" : fmt.kind, file, file.name, onUpload);
+  },
   addRecording: (subjectId: number, file: Blob, filename: string, onUpload?: (f: number) => void) =>
     addUpload(subjectId, "audio", file, filename, onUpload),
   addAudio: (subjectId: number, file: Blob, filename: string) => addUpload(subjectId, "audio", file, filename),

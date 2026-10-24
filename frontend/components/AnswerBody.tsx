@@ -106,7 +106,7 @@ function renderInline(text: string, key: string, citations: Citation[], onCite: 
             key={`${key}c${i++}`}
             type="button"
             onClick={() => onCite(c)}
-            title={`${c.source_title}${c.page ? ` · p. ${c.page}` : ""}\n“${c.cited_text.slice(0, 160)}”`}
+            title={`${c.source_title}${c.page ? ` · ${c.page_label ?? "p."} ${c.page}` : ""}\n“${c.cited_text.slice(0, 160)}”`}
             className="cite-marker"
           >
             {n}

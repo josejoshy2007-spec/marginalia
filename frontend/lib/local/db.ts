@@ -38,7 +38,7 @@ export interface SubjectRow extends Synced {
 export interface SourceRow extends Synced {
   id?: number;
   subject_id: number;
-  kind: "pdf" | "text" | "url" | "audio" | "video";
+  kind: "pdf" | "text" | "url" | "audio" | "video" | "slides" | "doc" | "sheet" | "image";
   title: string;
   url: string | null;
   text: string;
@@ -85,6 +85,7 @@ export interface Citation {
   end: number;
   page: number | null;
   cited_text: string;
+  page_label?: string;
 }
 
 export interface CardRow extends Synced {
@@ -113,6 +114,7 @@ export interface AttemptRow extends Synced {
 export interface BlobRow {
   key: string; // e.g. "episode-12"
   blob: Blob;
+  name?: string; // original file name of an upload (its extension picks the reader)
 }
 
 export interface SettingRow {

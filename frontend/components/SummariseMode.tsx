@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type ArtifactDetail, type ArtifactSummary, type Citation, type Source } from "@/lib/api";
+import { api, KIND_LABEL, type ArtifactDetail, type ArtifactSummary, type Citation, type Source } from "@/lib/api";
 import { markersToTokens } from "@/lib/cite";
 import AnswerBody from "./AnswerBody";
 import { ErrorNote, IBBadge, ModeHeader, NoSources, RetryLink, Segmented, useArtifacts, type StudyProps } from "./study/shared";
@@ -204,7 +204,7 @@ function SummaryForm(
 }
 
 function SourceChip({ s, on, toggle }: { s: Source; on: boolean; toggle: () => void }) {
-  const kind = { pdf: "PDF", text: "Notes", url: "Web", audio: "Lecture", video: "Video" }[s.kind];
+  const kind = KIND_LABEL[s.kind];
   return (
     <button
       type="button"

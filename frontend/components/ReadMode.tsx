@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, type Citation, type Source, type SourceDetail } from "@/lib/api";
+import { api, pageLabel, type Citation, type Source, type SourceDetail } from "@/lib/api";
 import type { Anchor, Thread } from "@/lib/threads";
 import type { Focus } from "./App";
 import MarginThread from "./MarginThread";
@@ -172,7 +172,7 @@ export default function ReadMode(p: Props) {
 
       {detail && (
         <div ref={docRef} onMouseUp={handleMouseUp} className="relative">
-          <DocumentText text={detail.text} pages={detail.pages} ranges={ranges} />
+          <DocumentText text={detail.text} pages={detail.pages} ranges={ranges} label={pageLabel(detail.kind).short} />
         </div>
       )}
       </div>
@@ -236,10 +236,12 @@ const DocumentText = memo(function DocumentText({
   text,
   pages,
   ranges,
+  label,
 }: {
   text: string;
   pages: { page: number; start: number }[];
   ranges: Range[];
+  label: string;
 }) {
   const paras = useMemo(() => splitParagraphs(text, pages), [text, pages]);
   return (
@@ -247,8 +249,8 @@ const DocumentText = memo(function DocumentText({
       {paras.map((para) => (
         <div key={para.start} className="relative" data-p={para.start} data-p-end={para.end}>
           {para.page !== undefined && pages.length > 0 && (
-            <span className="pointer-events-none absolute -left-14 top-1 hidden w-10 select-none text-right font-sans text-[11px] tracking-wide text-muted sm:block">
-              p.{para.page}
+            <span className="pointer-events-none absolute -left-16 top-1 hidden w-12 select-none text-right font-sans text-[11px] tracking-wide text-muted sm:block">
+              {label === "p." ? `p.${para.page}` : `${label} ${para.page}`}
             </span>
           )}
           <p className="mb-5 whitespace-pre-wrap">{renderSegments(text, para, ranges)}</p>

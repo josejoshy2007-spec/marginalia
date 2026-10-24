@@ -8,7 +8,8 @@
     "build": "next build",
     "build:static": "node scripts/build-static.mjs",
     "start": "next start",
-    "test:sync": "tsx scripts/sync-test.mts"
+    "test:sync": "tsx scripts/sync-test.mts",
+    "test:formats": "tsx scripts/formats-test.mts"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
@@ -21,6 +22,7 @@
     "@capacitor/splash-screen": "^8.0.2",
     "@capgo/capacitor-social-login": "^8.7.5",
     "dexie": "^4.4.6",
+    "fflate": "^0.8.3",
     "next": "16.4.1",
     "pdfjs-dist": "^6.4.299",
     "react": "19.3.0",
