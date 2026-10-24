@@ -50,7 +50,7 @@ export function ConfirmHost() {
   if (!req) return null;
   return (
     <div
-      className="fixed inset-0 z-[100] grid place-items-center bg-ink/30 px-4 backdrop-blur-[2px]"
+      className="safe-overlay fixed inset-0 z-[100] grid place-items-center bg-ink/30 px-4 backdrop-blur-[2px]"
       onMouseDown={(e) => e.target === e.currentTarget && close(false)}
     >
       <div role="alertdialog" aria-modal="true" aria-label={req.message} className="sheet-rise w-full max-w-sm rounded-2xl border border-line bg-card p-5 shadow-xl">

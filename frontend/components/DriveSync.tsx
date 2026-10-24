@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { syncConfigured } from "@/lib/local/google";
+import { prepareSignIn, syncConfigured } from "@/lib/local/google";
 import { connect, disconnect, syncNow, syncStatus, type SyncStatus } from "@/lib/local/sync";
 import { askConfirm } from "@/lib/confirm";
 
@@ -32,6 +32,10 @@ export default function DriveSync() {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [, tick] = useState(0);
+  // Have Google's sign-in ready before the student taps, so the browser lets its window open.
+  useEffect(() => {
+    prepareSignIn().catch(() => {});
+  }, []);
   useEffect(() => {
     const t = setInterval(() => tick((n) => n + 1), 30_000);
     return () => clearInterval(t);

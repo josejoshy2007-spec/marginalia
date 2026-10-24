@@ -102,9 +102,13 @@ export default function SettingsSheet({
   if (!s) return null;
   return (
     <div
-      className="fixed inset-0 z-[90] grid place-items-center overflow-y-auto bg-ink/30 px-3 py-6 backdrop-blur-[2px]"
-      onMouseDown={(e) => e.target === e.currentTarget && !firstRun && onClose()}
+      className="fixed inset-0 z-[90] overflow-y-auto bg-ink/30 backdrop-blur-[2px]"
     >
+      {/* min-h-full + items-center: centred when it fits, scrolls from the top on short phone screens. */}
+      <div
+        className="safe-overlay flex min-h-full items-center justify-center px-3"
+        onMouseDown={(e) => e.target === e.currentTarget && !firstRun && onClose()}
+      >
       <div role="dialog" aria-modal="true" aria-label="Settings" className="sheet-rise w-full max-w-lg rounded-2xl border border-line bg-card p-5 shadow-xl">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -252,6 +256,7 @@ export default function SettingsSheet({
             </details>
           </>
         )}
+      </div>
       </div>
     </div>
   );

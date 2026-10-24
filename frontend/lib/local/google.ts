@@ -79,42 +79,76 @@ function loadGis() {
   return gis;
 }
 
-async function webToken(interactive: boolean): Promise<{ value: string; expiresIn: number }> {
-  // A browser can only open Google's window in response to a tap, so background syncs wait for one.
-  if (!interactive) throw new AuthNeeded("Tap Sync now to sign in to Google again (browsers allow this once an hour).");
-  await loadGis();
-  return new Promise((resolve, reject) => {
-    const client = window.google!.accounts.oauth2.initTokenClient({
+let tokenClient: TokenClient | null = null;
+let waiting: { resolve: (t: { value: string; expiresIn: number }) => void; reject: (e: Error) => void } | null = null;
+
+/**
+ * Load Google's sign-in code ahead of time (when Settings opens). Browsers only allow the sign-in
+ * window to open straight from a tap, so nothing slow may run between the tap and the request.
+ */
+export function prepareSignIn(): Promise<void> {
+  if (!GOOGLE_CLIENT_ID || Capacitor.isNativePlatform()) return Promise.resolve();
+  return loadGis().then(() => {
+    tokenClient ??= window.google!.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
       scope: DRIVE_SCOPE,
-      callback: (r: TokenResponse) =>
-        r.access_token
-          ? resolve({ value: r.access_token, expiresIn: r.expires_in ?? 3600 })
-          : reject(new Error(r.error_description || r.error || "Google sign-in was cancelled.")),
-      error_callback: (e: { type?: string }) =>
-        reject(new Error(e?.type === "popup_closed" ? "Google sign-in was closed." : "Google sign-in failed.")),
+      callback: (r: TokenResponse) => {
+        const w = waiting;
+        waiting = null;
+        if (r.access_token) w?.resolve({ value: r.access_token, expiresIn: r.expires_in ?? 3600 });
+        else w?.reject(new Error(r.error_description || r.error || "Google sign-in was cancelled."));
+      },
+      error_callback: (e: { type?: string }) => {
+        const w = waiting;
+        waiting = null;
+        w?.reject(
+          new Error(
+            e?.type === "popup_failed_to_open"
+              ? "Your browser blocked Google's sign-in window. Allow pop-ups for this site (icon at the right of the address bar) and try again."
+              : e?.type === "popup_closed"
+                ? "Google's sign-in window was closed before finishing."
+                : "Google sign-in failed. Try again.",
+          ),
+        );
+      },
     });
-    client.requestAccessToken({ prompt: "" });
+  });
+}
+
+/** Must be called synchronously inside a tap handler (no awaits before it). */
+function webTokenFromTap(): Promise<{ value: string; expiresIn: number }> {
+  if (!tokenClient) {
+    prepareSignIn().catch(() => {});
+    return Promise.reject(new Error("Google sign-in is still loading. Tap again in a moment."));
+  }
+  waiting?.reject(new Error("Google sign-in was restarted."));
+  return new Promise((resolve, reject) => {
+    waiting = { resolve, reject };
+    tokenClient!.requestAccessToken({ prompt: "" });
   });
 }
 
 // ---------------------------------------------------------------- shared
 
 /**
- * A Drive access token. `interactive` may show Google's sign-in (call it from a tap); without it,
- * only a cached or silently renewed token is used, else AuthNeeded is thrown.
+ * A Drive access token. `interactive` may show Google's sign-in: call it first thing in a tap
+ * handler (in browsers the window must open synchronously from the tap). Without it, only a cached
+ * or silently renewed token is used, else AuthNeeded is thrown.
  */
-export async function driveToken(interactive = false): Promise<string> {
-  if (!GOOGLE_CLIENT_ID) throw new Error("Drive sync isn't set up in this build yet.");
-  if (valid()) return token!.value;
-  if (Capacitor.isNativePlatform()) {
-    const value = await nativeToken(interactive);
-    token = { value, expires: Date.now() + 50 * 60_000 };
-  } else {
-    const t = await webToken(interactive);
+export function driveToken(interactive = false): Promise<string> {
+  if (!GOOGLE_CLIENT_ID) return Promise.reject(new Error("Drive sync isn't set up in this build yet."));
+  if (valid()) return Promise.resolve(token!.value);
+  if (Capacitor.isNativePlatform())
+    return nativeToken(interactive).then((value) => {
+      token = { value, expires: Date.now() + 50 * 60_000 };
+      return value;
+    });
+  if (!interactive)
+    return Promise.reject(new AuthNeeded("Tap Sync now to sign in to Google again (browsers ask about once an hour)."));
+  return webTokenFromTap().then((t) => {
     token = { value: t.value, expires: Date.now() + t.expiresIn * 1000 };
-  }
-  return token.value;
+    return t.value;
+  });
 }
 
 /** Forget the token (after a 401, or when the student disconnects). */

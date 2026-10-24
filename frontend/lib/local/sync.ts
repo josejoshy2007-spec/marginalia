@@ -323,12 +323,15 @@ let running: Promise<ApplyResult | null> | null = null;
 
 /** Sync now. `interactive` (from a tap) may show Google sign-in; background syncs never do. */
 export function syncNow(interactive = false): Promise<ApplyResult | null> {
+  // From a tap, ask for the token before anything else so a browser lets Google's window open.
+  const tapToken = interactive ? driveToken(true) : null;
+  tapToken?.catch(() => {});
   running ??= (async () => {
     const s = await getSettings();
     if (!s.syncOn) return null;
     try {
       setStatus({ state: "syncing", stage: "Signing in" });
-      const drive = googleDrive(await driveToken(interactive));
+      const drive = googleDrive(await (tapToken ?? driveToken(false)));
       const email = s.syncEmail || (await drive.email());
       const res = await syncWith(drive, (stage) => setStatus({ state: "syncing", stage }));
       const lastSyncAt = now();
@@ -353,6 +356,7 @@ export function syncNow(interactive = false): Promise<ApplyResult | null> {
 
 /** Turn sync on from a tap: signs in, then does a first sync. */
 export async function connect(): Promise<ApplyResult | null> {
+  await driveToken(true); // opens Google's sign-in right away, inside the tap
   await saveSettings({ syncOn: true });
   return syncNow(true);
 }

@@ -188,7 +188,7 @@ export default function ReadMode(p: Props) {
 
       {/* Narrow screens: no margin, so the active thread floats above the command bar. */}
       {active && (
-        <div className="fixed inset-x-3 bottom-28 z-30 max-h-[50vh] overflow-y-auto lg:hidden">
+        <div className="fixed inset-x-3 bottom-[calc(7rem+env(safe-area-inset-bottom))] z-30 max-h-[50vh] overflow-y-auto lg:hidden">
           <MarginThread
             thread={active}
             active

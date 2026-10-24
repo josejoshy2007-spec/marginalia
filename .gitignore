@@ -14,3 +14,7 @@ android-signing/
 *.jks
 *.keystore
 frontend/out/
+
+# Google Cloud downloads / notes with client secrets (never commit)
+OAuth client*.txt
+client_secret*.json

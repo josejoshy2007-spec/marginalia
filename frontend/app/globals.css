@@ -61,6 +61,16 @@
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* Safe areas: the Android app is edge-to-edge (viewport-fit=cover), so pad for the status bar,
+   notch and navigation/gesture bar. env() is 0 in ordinary browsers. */
+.safe-frame {
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+.safe-overlay {
+  padding-top: max(1.5rem, env(safe-area-inset-top));
+  padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+}
+
 html,
 body {
   background: var(--paper);

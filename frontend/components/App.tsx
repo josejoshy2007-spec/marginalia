@@ -267,7 +267,9 @@ export default function App() {
   const readerSource = sources.find((s) => s.id === readSourceId) ?? null;
 
   return (
-    <div className="flex h-dvh w-full overflow-hidden bg-paper text-ink">
+    // .safe-frame keeps the app clear of the phone's status bar, notch and gesture bar (the Android
+    // app draws edge-to-edge); in browsers the insets are 0.
+    <div className="safe-frame flex h-dvh w-full overflow-hidden bg-paper text-ink">
       <Rail
         mode={mode}
         onMode={setMode}
