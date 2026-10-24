@@ -60,7 +60,7 @@ export default function DriveSync() {
     return (
       <section className="mt-6 border-t border-line pt-4">
         <h3 className="text-sm font-semibold">Sync with Google Drive</h3>
-        <p className="mt-1 text-xs text-muted">Not set up in this build yet.</p>
+        <p className="mt-1 text-xs text-muted">Not set up in this build yet (add the GOOGLE_CLIENT_ID repository variable and rebuild).</p>
       </section>
     );
 
