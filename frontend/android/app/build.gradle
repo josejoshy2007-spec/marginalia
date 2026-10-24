@@ -1,5 +1,11 @@
 apply plugin: 'com.android.application'
 
+// CI passes the run number so every new APK installs over the previous one; the signing key comes
+// from repository secrets via env vars (never committed).
+def ciVersionCode = Integer.parseInt(System.getenv("VERSION_CODE") ?: "1")
+def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+def keystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: ""
+
 android {
     namespace = "app.marginalia.study"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,9 +13,8 @@ android {
         applicationId "app.marginalia.study"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        // CI passes the run number so every new APK installs over the previous one.
-        versionCode (System.getenv("VERSION_CODE") ?: "1").toInteger()
-        versionName "1.0." + (System.getenv("VERSION_CODE") ?: "0")
+        versionCode = ciVersionCode
+        versionName = "1.0." + ciVersionCode
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -17,22 +22,22 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
-    signingConfigs {
-        release {
-            // Supplied by the GitHub Actions workflow from repository secrets (never committed).
-            def ks = System.getenv("ANDROID_KEYSTORE_PATH")
-            if (ks) {
-                storeFile file(ks)
-                storeType "pkcs12"
-                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                keyAlias System.getenv("ANDROID_KEY_ALIAS") ?: "marginalia"
-                keyPassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+    if (keystorePath) {
+        signingConfigs {
+            release {
+                storeFile = file(keystorePath)
+                storeType = "pkcs12"
+                storePassword = keystorePassword
+                keyAlias = "marginalia"
+                keyPassword = keystorePassword
             }
         }
     }
     buildTypes {
         release {
-            if (System.getenv("ANDROID_KEYSTORE_PATH")) signingConfig signingConfigs.release
+            if (keystorePath) {
+                signingConfig = signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
