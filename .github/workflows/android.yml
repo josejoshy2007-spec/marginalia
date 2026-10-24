@@ -1,0 +1,91 @@
+# Builds the Android app (APK) in the cloud, so no Android Studio is needed.
+# Every push to main publishes it as a GitHub Release; the newest is always at
+#   https://github.com/<you>/<repo>/releases/latest/download/marginalia.apk
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+    paths: ["frontend/**", ".github/workflows/android.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # to publish the release
+
+concurrency:
+  group: android
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install
+        run: npm ci
+
+      - name: Build the on-device web app
+        run: npm run build:static
+
+      - name: App icons and splash screen
+        run: >
+          npx --yes @capacitor/assets@3 generate --android
+          --iconBackgroundColor '#1e2427' --iconBackgroundColorDark '#1e2427'
+          --splashBackgroundColor '#f5f0e6' --splashBackgroundColorDark '#1b1a17'
+
+      - name: Copy into the Android project
+        run: npx cap sync android
+
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.p12"
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.p12" >> "$GITHUB_ENV"
+            echo "VARIANT=release" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret: building a debug-signed APK. Add the secrets so updates install over each other."
+            echo "VARIANT=debug" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build APK
+        working-directory: frontend/android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          chmod +x gradlew
+          if [ "$VARIANT" = release ]; then ./gradlew --no-daemon assembleRelease; else ./gradlew --no-daemon assembleDebug; fi
+          cp app/build/outputs/apk/$VARIANT/app-$VARIANT.apk "$GITHUB_WORKSPACE/marginalia.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marginalia-apk
+          path: marginalia.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Marginalia 1.0.${{ github.run_number }}
+          make_latest: true
+          files: marginalia.apk
+          body: |
+            Download **marginalia.apk** below on your Android phone and open it to install.
+            Built from ${{ github.sha }}.

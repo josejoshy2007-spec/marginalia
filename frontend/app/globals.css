@@ -1,0 +1,195 @@
+@import "tailwindcss";
+
+/* Warm "paper and ink" palette. Light by default, dark follows the OS. */
+:root {
+  --paper: #f5f0e6;
+  --rail: #efe8da;
+  --card: #fffdf8;
+  --sunken: #ede6d8;
+  --line: #ddd3c1;
+  --ink: #1e2427;
+  --ink-soft: #2c3336;
+  --muted: #7a7064;
+  --accent: #b5472a;
+  --accent-soft: #f6e1d8;
+  --moss: #4f6d4a;
+  --danger: #a3261b;
+  --danger-soft: #f7dcd7;
+  --hl-anchor: #f1dd9e;
+  --hl-anchor-active: #ebc65d;
+  --hl-focus: #f5b79f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #1b1a17;
+    --rail: #171613;
+    --card: #23221e;
+    --sunken: #2c2a25;
+    --line: #3a3731;
+    --ink: #ece6da;
+    --ink-soft: #d9d2c4;
+    --muted: #9b9184;
+    --accent: #e0805f;
+    --accent-soft: #3d2a22;
+    --moss: #8bab7f;
+    --danger: #ef8a7c;
+    --danger-soft: #3c2320;
+    --hl-anchor: #5a4a1f;
+    --hl-anchor-active: #7a6220;
+    --hl-focus: #7a3d28;
+  }
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-rail: var(--rail);
+  --color-card: var(--card);
+  --color-sunken: var(--sunken);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-moss: var(--moss);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --font-sans: var(--font-ui), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-display-face), Georgia, serif;
+  --font-reading: var(--font-reading-face), Georgia, serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+html,
+body {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  font-family: var(--font-sans);
+}
+
+::selection {
+  background: var(--hl-anchor-active);
+  color: inherit;
+}
+
+/* ---------- reading highlights ---------- */
+.hl-anchor {
+  background: var(--hl-anchor);
+  border-radius: 2px;
+}
+.hl-anchor-active {
+  background: var(--hl-anchor-active);
+  border-radius: 2px;
+}
+.hl-focus {
+  background: var(--hl-focus);
+  border-radius: 2px;
+  box-shadow: 0 0 0 2px var(--hl-focus);
+  animation: focus-fade 3.2s ease-out forwards;
+}
+@keyframes focus-fade {
+  0%,
+  60% {
+    background: var(--hl-focus);
+    box-shadow: 0 0 0 2px var(--hl-focus);
+  }
+  100% {
+    background: transparent;
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+
+/* ---------- citation markers ---------- */
+.cite-marker {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  margin: 0 1px 0 2px;
+  padding: 0 4px;
+  vertical-align: 0.2em;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: 600 0.66rem/1 var(--font-sans);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.cite-marker:hover,
+.cite-marker:focus-visible {
+  background: var(--accent);
+  color: #fff;
+  outline: none;
+}
+
+.caret {
+  display: inline-block;
+  width: 0.45em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.12em;
+  background: var(--accent);
+  animation: blink 1s steps(2) infinite;
+}
+@keyframes blink {
+  to {
+    opacity: 0;
+  }
+}
+
+.sheet-rise {
+  animation: rise 0.22s ease-out;
+}
+@keyframes rise {
+  from {
+    transform: translateY(12px);
+    opacity: 0;
+  }
+}
+
+/* ---------- small primitives ---------- */
+.field {
+  border-radius: 0.75rem;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  padding: 0.55rem 0.8rem;
+  outline: none;
+}
+.field:focus {
+  border-color: var(--accent);
+}
+.btn-primary {
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  padding: 0.5rem 1.1rem;
+  font-weight: 500;
+  font-size: 0.92rem;
+}
+.btn-primary:disabled {
+  opacity: 0.35;
+}
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  padding: 0.4rem 0.9rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.btn-ghost:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+select option {
+  background: var(--card);
+  color: var(--ink);
+  font-size: 1rem;
+}

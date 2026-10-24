@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+backend/data/
+
+# Android signing key (kept out of git; uploaded to GitHub as secrets)
+android-signing/
+*.p12
+*.jks
+*.keystore
+frontend/out/
