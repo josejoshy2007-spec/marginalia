@@ -5,7 +5,7 @@
  */
 import { db, type ChunkRow, type Citation, type SourceRow } from "./db";
 import { embed } from "./gemini";
-import { pageLabel } from "../api";
+import { pageLabel } from "../labels";
 
 export type Retrieved = { chunk: ChunkRow; source: SourceRow; score: number };
 
