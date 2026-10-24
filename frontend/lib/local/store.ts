@@ -20,7 +20,7 @@ import type {
   StreamEvent,
   Subject,
 } from "../api";
-import { db, now, requestPersistence, type ArtifactRow, type CardRow, type SourceRow, type SubjectRow } from "./db";
+import { db, now, requestPersistence, tombstone, type ArtifactRow, type CardRow, type SourceRow, type SubjectRow } from "./db";
 import { chunkText } from "./chunker";
 import { buildExam, draftMarkscheme, EXAM_SIZES, markAnswer, markQuiz } from "./exams";
 import {
@@ -344,6 +344,8 @@ async function addUpload(subjectId: number, kind: "pdf" | "audio", file: Blob, f
 }
 
 async function deleteSourceRows(id: number) {
+  const src = await db.sources.get(id);
+  if (src?.status === "ready") await tombstone("sources", [src.uid]);
   await db.chunks.where("source_id").equals(id).delete();
   await db.blobs.delete(uploadKey(id));
   await db.sources.delete(id);
@@ -659,6 +661,7 @@ export const localApi = {
   deleteSubject: async (id: number): Promise<void> => {
     for (const s of await db.sources.where("subject_id").equals(id).toArray()) await deleteSourceRows(s.id!);
     for (const a of await db.artifacts.where("subject_id").equals(id).toArray()) await localApi.deleteArtifact(a.id!);
+    await tombstone("subjects", [(await db.subjects.get(id))?.uid]);
     await db.subjects.delete(id);
   },
 
@@ -727,6 +730,8 @@ export const localApi = {
     return localApi.artifact(id);
   },
   deleteArtifact: async (id: number): Promise<void> => {
+    const art = await db.artifacts.get(id);
+    if (art?.status === "ready") await tombstone("artifacts", [art.uid]);
     await db.cards.where("deck_id").equals(id).delete();
     await db.attempts.where("quiz_id").equals(id).delete();
     await db.blobs.delete(audioKey(id));

@@ -6,6 +6,7 @@ import { DEFAULTS, getSettings, saveSettings, type Settings } from "@/lib/local/
 import { localApi } from "@/lib/local/store";
 import { saveFile, scheduleReminder, isNative } from "@/lib/native";
 import { CloseIcon } from "./icons";
+import DriveSync from "./DriveSync";
 
 const mb = (n: number) => (n > 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`);
 
@@ -161,6 +162,8 @@ export default function SettingsSheet({
 
         {!firstRun && (
           <>
+            <DriveSync />
+
             <section className="mt-6 border-t border-line pt-4">
               <h3 className="text-sm font-semibold">Review reminder</h3>
               <label className="mt-2 flex items-center gap-2 text-sm">

@@ -7,7 +7,8 @@
     "dev:local": "node scripts/dev-local.mjs",
     "build": "next build",
     "build:static": "node scripts/build-static.mjs",
-    "start": "next start"
+    "start": "next start",
+    "test:sync": "tsx scripts/sync-test.mts"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
@@ -18,6 +19,7 @@
     "@capacitor/local-notifications": "^8.3.1",
     "@capacitor/share": "^8.0.3",
     "@capacitor/splash-screen": "^8.0.2",
+    "@capgo/capacitor-social-login": "^8.7.5",
     "dexie": "^4.4.6",
     "next": "16.4.1",
     "pdfjs-dist": "^6.4.299",

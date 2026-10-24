@@ -17,11 +17,13 @@ export default function Rail({
   onMode,
   subjectName,
   onSettings,
+  settingsAttention,
 }: {
   mode: Mode;
   onMode: (m: Mode) => void;
   subjectName?: string;
   onSettings?: () => void;
+  settingsAttention?: boolean;
 }) {
   return (
     <nav
@@ -67,11 +69,12 @@ export default function Rail({
         <button
           type="button"
           onClick={onSettings}
-          title="Settings"
-          aria-label="Settings"
-          className="mt-auto grid h-9 w-9 place-items-center rounded-xl text-muted transition-colors hover:bg-card/60 hover:text-ink"
+          title={settingsAttention ? "Settings (Drive sync needs you)" : "Settings"}
+          aria-label={settingsAttention ? "Settings, Drive sync needs attention" : "Settings"}
+          className="relative mt-auto grid h-9 w-9 place-items-center rounded-xl text-muted transition-colors hover:bg-card/60 hover:text-ink"
         >
           <DialIcon />
+          {settingsAttention && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-accent" />}
         </button>
       )}
       {subjectName && (

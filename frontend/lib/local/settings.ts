@@ -13,6 +13,9 @@ export type Settings = {
   retrievalK: number;
   remindersOn: boolean;
   reminderHour: number; // local hour for the daily "cards due" reminder
+  syncOn: boolean; // Google Drive sync connected
+  syncEmail: string;
+  lastSyncAt: string;
 };
 
 export const DEFAULTS: Settings = {
@@ -27,6 +30,9 @@ export const DEFAULTS: Settings = {
   retrievalK: 12,
   remindersOn: true,
   reminderHour: 17,
+  syncOn: false,
+  syncEmail: "",
+  lastSyncAt: "",
 };
 
 export const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";

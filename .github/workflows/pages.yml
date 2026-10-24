@@ -34,6 +34,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - name: Build (served from /<repo>/)
+        env:
+          NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }} # for Drive sync (public id, not a secret)
         run: npm run build:static -- --base "/${{ github.event.repository.name }}"
       - run: touch out/.nojekyll
       - uses: actions/upload-pages-artifact@v3

@@ -6,6 +6,8 @@ import { getSettings } from "@/lib/local/settings";
 import { localApi } from "@/lib/local/store";
 import { scheduleReminder } from "@/lib/native";
 import SettingsSheet from "./SettingsSheet";
+import { useSyncStatus } from "./DriveSync";
+import { startAutoSync } from "@/lib/local/sync";
 import { addCitations, forRetry, newThreadId, stripCites, type Anchor, type Thread, type Turn } from "@/lib/threads";
 import Rail, { type Mode } from "./Rail";
 import LibraryMode from "./LibraryMode";
@@ -41,7 +43,9 @@ export default function App() {
       if (!s.geminiKey) setSettings("first");
       scheduleReminder(s.remindersOn, s.reminderHour, await localApi.dueCards());
     });
+    startAutoSync();
   }, []);
+  const sync = useSyncStatus();
 
   // ---- data loading ----
   const refreshSubjects = useCallback(async () => {
@@ -78,6 +82,17 @@ export default function App() {
     setSources(list);
     return list;
   }, [subjectId]);
+
+  // Drive sync brought in changes from another device: reload the shelf.
+  useEffect(() => {
+    const onChange = async () => {
+      const list = await refreshSubjects();
+      if (subjectId != null && !list.some((x) => x.id === subjectId)) setSubjectId(list[0]?.id ?? null);
+      else refreshSources();
+    };
+    window.addEventListener("marginalia:library-changed", onChange);
+    return () => window.removeEventListener("marginalia:library-changed", onChange);
+  }, [refreshSubjects, refreshSources, subjectId]);
 
   useEffect(() => {
     if (subjectId == null) return;
@@ -258,6 +273,7 @@ export default function App() {
         onMode={setMode}
         subjectName={subject?.name}
         onSettings={ENGINE === "local" ? () => setSettings("open") : undefined}
+        settingsAttention={sync.state === "auth" || sync.state === "error"}
       />
 
       <main className="relative flex min-w-0 flex-1 flex-col">

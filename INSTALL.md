@@ -75,6 +75,50 @@ quota. Studio audio isn't copied; render it again in Listen.
 Use **Settings → Export backup** on the phone now and then, and save it to Drive. The library lives
 only on the phone.
 
+## Sync between devices with Google Drive
+
+Once set up, the Android app, the web version and any other phone you sign in on all show the same
+subjects, sources, cards, quizzes and marks. Everything goes into a hidden app folder in **your own**
+Google Drive. You can't see it in Drive, and no other app can read it. To turn it on, open
+**Settings → Sync with Google Drive → Connect Google Drive** on each device.
+
+It syncs on its own: when the app opens, about 20 seconds after you change something, and when you
+come back to the app. If the same item is changed on two devices, the newer change wins; deleting
+something deletes it everywhere. The phone renews its Google sign-in silently. A browser asks you to
+tap **Sync now** about once an hour.
+
+### One-time Google Cloud setup (about 10 minutes, free)
+
+The app needs its own Google sign-in "client ID". Do this on a computer, signed in to Google as
+**josejoshy2007@gmail.com**:
+
+1. Go to **console.cloud.google.com**. Create a project named `Marginalia` (top bar → project picker
+   → **New project**). If it asks about billing, skip it; nothing here needs billing.
+2. **APIs & Services → Library**: search for **Google Drive API** and click **Enable**.
+3. **APIs & Services → OAuth consent screen** (also called "Google Auth Platform"):
+   - Click **Get started**. App name: `Marginalia`. Support email: your Gmail.
+   - Audience: **External**. Contact email: your Gmail. Agree, then **Create**.
+   - Under **Audience → Test users**, click **Add users** and add `josejoshy2007@gmail.com`, plus any
+     other Google account you'll use.
+   - Under **Data access → Add or remove scopes**, add `.../auth/drive.appdata` and save.
+4. **Clients → Create client → Web application**:
+   - Name: `Marginalia web`.
+   - Authorised JavaScript origins: `https://josejoshy2007-spec.github.io`, `http://localhost:3001`
+     and `http://localhost:3002`. Leave redirect URIs empty.
+   - Click **Create** and copy the **Client ID** (it ends in `.apps.googleusercontent.com`).
+5. **Clients → Create client → Android**:
+   - Name: `Marginalia Android`. Package name: `app.marginalia.study`.
+   - SHA-1 certificate fingerprint: `76:99:E7:82:D2:8C:30:0B:FF:62:09:25:83:17:C3:C0:AF:46:7A:B6`
+     (this is your signing key's public fingerprint, not a secret).
+   - Click **Create**. You don't need to copy anything from this one.
+6. On GitHub: repo **Settings → Secrets and variables → Actions → Variables** tab → **New repository
+   variable**. Name: `GOOGLE_CLIENT_ID`. Value: the Web client ID from step 4.
+7. **Actions** tab → **Android APK → Run workflow**, then **Web app (GitHub Pages) → Run workflow**.
+   Install the new APK over the old one.
+
+While the app is in "Testing" mode, only the test users from step 3 can sign in. Google may show
+"Google hasn't verified this app". Tap **Continue**; it's your own app.
+
 ## Things to know
 
 - **Free Gemini quota is small.** The main model allows roughly 20 requests a day on the free tier;

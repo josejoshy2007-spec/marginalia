@@ -14,6 +14,11 @@ const config: CapacitorConfig = {
       smallIcon: "ic_stat_icon",
       iconColor: "#b5472a",
     },
+    // Google sign-in for Drive sync only (other providers left out of the APK).
+    SocialLogin: {
+      providers: { google: true, facebook: false, apple: false, twitter: false },
+      logLevel: 1,
+    },
     SplashScreen: {
       launchShowDuration: 800,
       backgroundColor: "#f5f0e6",

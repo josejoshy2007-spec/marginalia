@@ -41,6 +41,8 @@ jobs:
         run: npm ci
 
       - name: Build the on-device web app
+        env:
+          NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }} # for Drive sync (public id, not a secret)
         run: npm run build:static
 
       - name: App icons and splash screen

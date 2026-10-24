@@ -7,7 +7,27 @@ import Dexie, { type Table } from "dexie";
 
 export type PageSpan = { page: number; start: number; end: number };
 
-export interface SubjectRow {
+/**
+ * Fields that let the same row be recognised on every device for Google Drive sync: a global id
+ * (local integer ids differ per device) and the time of the last change. Both are filled in by
+ * hooks below, so ordinary code never sets them.
+ */
+export interface Synced {
+  uid?: string;
+  updated_at?: string;
+}
+
+export type SyncedTable = "subjects" | "sources" | "artifacts" | "cards" | "attempts";
+export const SYNCED_TABLES: SyncedTable[] = ["subjects", "sources", "artifacts", "cards", "attempts"];
+
+/** A deleted row, remembered so the deletion reaches other devices. */
+export interface TombstoneRow {
+  uid: string;
+  table: SyncedTable;
+  deleted_at: string;
+}
+
+export interface SubjectRow extends Synced {
   id?: number;
   name: string;
   created_at: string;
@@ -15,7 +35,7 @@ export interface SubjectRow {
   ib_level?: "SL" | "HL" | null;
 }
 
-export interface SourceRow {
+export interface SourceRow extends Synced {
   id?: number;
   subject_id: number;
   kind: "pdf" | "text" | "url" | "audio" | "video";
@@ -43,7 +63,7 @@ export interface ChunkRow {
   embedding: Float32Array; // unit length, so dot product = cosine similarity
 }
 
-export interface ArtifactRow {
+export interface ArtifactRow extends Synced {
   id?: number;
   subject_id: number;
   kind: "deck" | "quiz" | "sheet" | "episode" | "summary" | "exam";
@@ -67,7 +87,7 @@ export interface Citation {
   cited_text: string;
 }
 
-export interface CardRow {
+export interface CardRow extends Synced {
   id?: number;
   deck_id: number;
   front: string;
@@ -81,7 +101,7 @@ export interface CardRow {
   last_reviewed_at: string | null;
 }
 
-export interface AttemptRow {
+export interface AttemptRow extends Synced {
   id?: number;
   quiz_id: number;
   answers: unknown[];
@@ -109,6 +129,7 @@ class StudyDB extends Dexie {
   attempts!: Table<AttemptRow, number>;
   blobs!: Table<BlobRow, string>;
   settings!: Table<SettingRow, string>;
+  tombstones!: Table<TombstoneRow, string>;
 
   constructor() {
     super("marginalia");
@@ -122,12 +143,67 @@ class StudyDB extends Dexie {
       blobs: "key",
       settings: "key",
     });
+    // v2: Google Drive sync (global uid + updated_at on synced rows, tombstones for deletions).
+    this.version(2)
+      .stores({
+        subjects: "++id, created_at, &uid",
+        sources: "++id, subject_id, status, &uid",
+        artifacts: "++id, subject_id, [subject_id+kind], status, &uid",
+        cards: "++id, deck_id, due_at, &uid",
+        attempts: "++id, quiz_id, &uid",
+        tombstones: "uid, table",
+      })
+      .upgrade(async (tx) => {
+        for (const t of SYNCED_TABLES)
+          await tx.table(t).toCollection().modify((row: Synced & { created_at?: string }) => {
+            row.uid ??= newUid();
+            row.updated_at ??= row.created_at ?? now();
+          });
+      });
+    for (const t of SYNCED_TABLES) {
+      const table = this.table(t);
+      table.hook("creating", (_key, obj: Synced) => {
+        obj.uid ??= newUid();
+        obj.updated_at ??= now();
+        localChanged();
+      });
+      table.hook("updating", function (mods) {
+        localChanged();
+        // Sync writes carry their own updated_at; every other change is stamped now.
+        if (!("updated_at" in mods)) return { updated_at: now() };
+      });
+    }
   }
 }
 
 export const db = new StudyDB();
 
 export const now = () => new Date().toISOString();
+
+export function newUid(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
+
+/** Sync applies remote rows with this set, so its own writes don't count as new local changes. */
+export const syncState = { applying: false };
+
+/** Tell the sync engine (if connected) that something changed locally. */
+function localChanged() {
+  if (syncState.applying || typeof window === "undefined") return;
+  queueMicrotask(() => window.dispatchEvent(new Event("marginalia:local-change")));
+}
+
+/** Remember deletions so they propagate to other devices. */
+export async function tombstone(table: SyncedTable, uids: (string | undefined)[]) {
+  const t = now();
+  const rows = uids.filter((u): u is string => !!u).map((uid) => ({ uid, table, deleted_at: t }));
+  if (rows.length) {
+    await db.tombstones.bulkPut(rows);
+    localChanged();
+  }
+}
 
 /** Ask the browser not to evict our data under storage pressure (best effort). */
 export async function requestPersistence() {
