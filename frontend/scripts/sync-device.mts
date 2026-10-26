@@ -90,6 +90,29 @@ const commands: Record<string, (a: any) => Promise<unknown>> = {
   async deleteSubject({ name }) {
     await localApi.deleteSubject(await subjectId(name));
   },
+  /** A saved Ask AI conversation; with `source`, its answer cites that source's last chunk. */
+  async conversation({ subject, title, source, mode = "sources" }) {
+    const sid = await subjectId(subject);
+    let citations: any[] = [];
+    if (source) {
+      const src = (await db.sources.toArray()).find((s) => s.title === source)!;
+      const chunk = (await db.chunks.where("source_id").equals(src.id!).sortBy("ord")).at(-1)!;
+      citations = [{ source_id: src.id, source_title: src.title, chunk_id: chunk.id, start: chunk.char_start, end: chunk.char_end, page: null, cited_text: chunk.text }];
+    }
+    const t = {
+      id: crypto.randomUUID(), kind: "ask", mode, title, busy: false, createdAt: new Date().toISOString(),
+      turns: [{ role: "user", text: `${title}?` }, { role: "assistant", body: citations.length ? "Answer ⟦1⟧" : "Answer", citations }],
+    };
+    await localApi.saveThread(sid, t as any);
+    return t.id;
+  },
+  async deleteConversation({ title }) {
+    await localApi.deleteThread((await db.threads.toArray()).find((t) => t.title === title)!.uid!);
+  },
+  /** What the app shows for a subject's conversations (localApi.threads, as the UI loads them). */
+  async conversations({ subject }) {
+    return (await localApi.threads(await subjectId(subject))).map((t) => `${t.title}:${t.mode}:${t.turns.length}`).sort();
+  },
   async sync() {
     return syncWith(drive);
   },
@@ -116,6 +139,20 @@ const commands: Record<string, (a: any) => Promise<unknown>> = {
             attempts: await db.attempts.where("quiz_id").equals(a.id!).count(),
           };
         })),
+        conversations: await Promise.all(
+          (await db.threads.where("subject_id").equals(s.id!).toArray())
+            .sort((x, y) => x.title.localeCompare(y.title))
+            .map(async (t) => {
+              const cite = (t.turns as any[]).flatMap((x) => x.citations ?? [])[0];
+              const chunk = cite ? await db.chunks.get(cite.chunk_id) : undefined;
+              return {
+                title: t.title,
+                mode: t.mode,
+                turns: t.turns.length,
+                citation: cite ? (chunk && chunk.source_id === cite.source_id ? chunk.text : "BROKEN") : null,
+              };
+            }),
+        ),
       };
     }
     return out;

@@ -43,6 +43,8 @@ import { preview, schedule, type Grade } from "./srs";
 import { buildSummary, SUMMARY_FORMATS, SUMMARY_LENGTH } from "./summarize";
 import { readAnswer, readQuestion, readQuizAnswers } from "./vision";
 import { exportAll, importAll } from "./backup";
+import type { Thread } from "../threads";
+import type { ThreadRow } from "./db";
 import { formatOf, unsupportedReason } from "./formats";
 
 // ---------------------------------------------------------------- jobs
@@ -354,6 +356,12 @@ async function addUpload(subjectId: number, kind: SourceRow["kind"], file: Blob,
 
 async function deleteSourceRows(id: number) {
   const src = await db.sources.get(id);
+  // Margin threads beside this source go with it.
+  const margins = (await db.threads.where("subject_id").equals(src?.subject_id ?? -1).toArray()).filter((t) => t.source_id === id);
+  if (margins.length) {
+    await tombstone("threads", margins.map((t) => t.uid));
+    await db.threads.bulkDelete(margins.map((t) => t.id!));
+  }
   if (src?.status === "ready") await tombstone("sources", [src.uid]);
   await db.chunks.where("source_id").equals(id).delete();
   await db.blobs.delete(uploadKey(id));
@@ -478,6 +486,13 @@ When the student has highlighted a passage, treat it as the focus of their quest
 
 Write for a student: clear, compact, no filler. Use short paragraphs or flat lists; light Markdown (bold, italics, headings) is fine. Never use LaTeX or $…$ math: write formulas in plain text with Unicode where needed (CO₂, H₂O, x², →).`;
 
+/** Ask AI's "Ask anything": a general tutor, not limited to (or citing) the student's sources. */
+const GENERAL_SYSTEM = `You are a patient, knowledgeable tutor helping a student study. Answer from general knowledge (the student's own sources are not attached to this conversation, so never claim something comes from "your notes" or "your sources").
+
+Be accurate and say when something is uncertain, debated, or depends on the syllabus or teacher. For problems, show the steps. Prefer explaining and checking understanding over just giving answers; for homework-style tasks, guide the student to the answer.
+
+Write clearly and compactly: short paragraphs or flat lists, light Markdown (bold, italics, headings) is fine. Never use LaTeX or $…$ math: write formulas in plain text with Unicode where needed (CO₂, x², →).`;
+
 const MARKER = /\[(\d{1,3}(?:\s*[,;]\s*\d{1,3})*)\]/g;
 const PARTIAL = /\[[\d,;\s]{0,20}$/;
 
@@ -523,10 +538,11 @@ export async function streamChat(
   await boot();
   const subject = await db.subjects.get(subjectId);
   const s = await getSettings();
+  const general = payload.mode === "general";
   const ids = [...payload.source_ids];
   if (payload.selection && !ids.includes(payload.selection.source_id)) ids.push(payload.selection.source_id);
-  let hits: Retrieved[];
-  try {
+  let hits: Retrieved[] = [];
+  if (!general) try {
     const query = payload.selection ? `${payload.selection.text}\n\n${payload.message}` : payload.message;
     hits = await retrieve(subjectId, ids, query, s.retrievalK);
   } catch (e) {
@@ -537,7 +553,7 @@ export async function streamChat(
     type: "sources",
     sources: hits.map((r) => ({ source_id: r.source.id!, chunk_id: r.chunk.id!, title: r.source.title, page: r.chunk.page_start })),
   });
-  if (!hits.length) {
+  if (!hits.length && !general) {
     onEvent({ type: "text", text: "None of the checked sources contain anything I can use yet. Check at least one ready source in the Library and ask again." });
     onEvent({ type: "done" });
     return;
@@ -552,9 +568,12 @@ export async function streamChat(
   const question = payload.selection
     ? `I highlighted this passage:\n<highlight>\n${payload.selection.text}\n</highlight>\n\n${payload.message}`
     : payload.message;
-  contents.push({ role: "user", parts: [{ text: "Passages:\n\n" + hits.map((r, i) => passageBlock(i + 1, r)).join("\n\n") + "\n\n" + question }] });
+  contents.push({
+    role: "user",
+    parts: [{ text: general ? question : "Passages:\n\n" + hits.map((r, i) => passageBlock(i + 1, r)).join("\n\n") + "\n\n" + question }],
+  });
   const body = {
-    systemInstruction: { parts: [{ text: SYSTEM + ib.context(subject) }] },
+    systemInstruction: { parts: [{ text: (general ? GENERAL_SYSTEM : SYSTEM) + ib.context(subject) }] },
     contents,
     generationConfig: { maxOutputTokens: s.maxTokens },
   };
@@ -668,10 +687,54 @@ export const localApi = {
     summary_formats: Object.fromEntries(Object.entries(SUMMARY_FORMATS).map(([k, v]) => [k, v[0]])),
   }),
   deleteSubject: async (id: number): Promise<void> => {
+    await db.threads.where("subject_id").equals(id).delete(); // the subject's tombstone removes them elsewhere
     for (const s of await db.sources.where("subject_id").equals(id).toArray()) await deleteSourceRows(s.id!);
     for (const a of await db.artifacts.where("subject_id").equals(id).toArray()) await localApi.deleteArtifact(a.id!);
     await tombstone("subjects", [(await db.subjects.get(id))?.uid]);
     await db.subjects.delete(id);
+  },
+
+  /** Saved conversations of a subject (Ask AI, quick answers, margin threads), newest first. */
+  threads: async (subjectId: number): Promise<Thread[]> => {
+    const rows = await db.threads.where("subject_id").equals(subjectId).toArray();
+    rows.sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
+    return rows.map((r) => ({
+      id: r.uid!,
+      kind: r.kind,
+      mode: r.mode,
+      title: r.title || undefined,
+      sourceId: r.source_id ?? undefined,
+      anchor: r.anchor,
+      turns: r.turns as Thread["turns"],
+      busy: false,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    }));
+  },
+  /** Save (create or update) a conversation; empty drafts aren't stored. */
+  saveThread: async (subjectId: number, t: Thread): Promise<void> => {
+    if (!t.turns.length) return;
+    const row: Omit<ThreadRow, "id"> = {
+      uid: t.id,
+      subject_id: subjectId,
+      kind: t.kind,
+      mode: t.mode ?? "sources",
+      title: t.title ?? "",
+      source_id: t.sourceId ?? null,
+      anchor: t.anchor ?? null,
+      // An answer still streaming when saved is stored as it stands; errors are kept so Retry still works.
+      turns: t.turns,
+      created_at: t.createdAt ?? now(),
+    };
+    const cur = await db.threads.where("uid").equals(t.id).first();
+    if (cur) await db.threads.update(cur.id!, row);
+    else await db.threads.add(row as ThreadRow);
+  },
+  deleteThread: async (uid: string): Promise<void> => {
+    const cur = await db.threads.where("uid").equals(uid).first();
+    if (!cur) return;
+    await tombstone("threads", [uid]);
+    await db.threads.delete(cur.id!);
   },
 
   sources: async (subjectId: number): Promise<Source[]> => {

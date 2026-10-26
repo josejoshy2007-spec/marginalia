@@ -143,6 +143,38 @@ try {
     assert.deepEqual(a8, b8);
   });
 
+  // 9. Conversations are kept per subject: making and switching subjects never loses them.
+  await A.run("subject", { name: "Chemistry" });
+  await A.run("source", { subject: "Chemistry", title: "Bonding" });
+  await A.run("conversation", { subject: "Chemistry", title: "Ionic vs covalent", source: "Bonding" });
+  await A.run("conversation", { subject: "Chemistry", title: "Exam tips", mode: "general" });
+  await A.run("subject", { name: "History" });
+  await A.run("conversation", { subject: "History", title: "Causes of WW1", mode: "general" });
+  const [chem, hist] = [await A.run("conversations", { subject: "Chemistry" }), await A.run("conversations", { subject: "History" })];
+  check("each subject keeps its own saved conversations after making another subject", () => {
+    assert.deepEqual(chem, ["Exam tips:general:2", "Ionic vs covalent:sources:2"]);
+    assert.deepEqual(hist, ["Causes of WW1:general:2"]);
+  });
+
+  // 10. Conversations sync, with citations remapped to the other device's copy of the source.
+  await A.run("sync");
+  await B.run("sync");
+  const [a10, b10] = [await A.run("state"), await B.run("state")];
+  check("conversations reach the other device with working citations", () => {
+    assert.deepEqual(b10.Chemistry.conversations, [
+      { title: "Exam tips", mode: "general", turns: 2, citation: null },
+      { title: "Ionic vs covalent", mode: "sources", turns: 2, citation: "Gamma paragraph." },
+    ]);
+    assert.deepEqual(a10, b10);
+  });
+
+  // 11. Deleting a conversation on one device removes it on the other.
+  await B.run("deleteConversation", { title: "Exam tips" });
+  await B.run("sync");
+  await A.run("sync");
+  const a11 = await A.run("conversations", { subject: "Chemistry" });
+  check("deleted conversation disappears on the other device", () => assert.deepEqual(a11, ["Ionic vs covalent:sources:2"]));
+
   console.log(`\nALL ${passed} SYNC CHECKS PASSED`);
 } finally {
   A.stop();

@@ -105,9 +105,10 @@ Settings: `GEMINI_API_KEY`, `GEMINI_MODEL` (default `gemini-3.8-flash`; change i
 
 ## Frontend architecture (`frontend/`)
 
-The UI is **mode-based, not paneled**. One main surface at a time, switched from a slim left rail (Alt+1–5: Library, Read, Summarise, Practice, Listen):
+The UI is **mode-based, not paneled**. One main surface at a time, switched from a slim left rail (Library Alt+1, Read Alt+2, Ask AI Alt+6, Summarise Alt+3, Practice Alt+4, Listen Alt+5; keys live on `MODES` in `Rail.tsx`):
 
 - **Library** (`LibraryMode.tsx`): subject switcher/creation, add source (PDF drop / paste / link), source cards whose checkbox controls `Source.checked` (= "in play for answers").
+- **Ask AI** (`AskMode.tsx`): saved conversations for the current subject (list + conversation; one pane at a time on phones). Toggle per conversation: **From my sources** (grounded, cited, like the command bar) or **Ask anything** (`ChatPayload.mode: "general"`: no retrieval, `GENERAL_SYSTEM` tutor prompt + IB context, clearly labelled; local engine only). The command bar's quick answers (`sheet` thread) are listed as "Quick questions". The command bar is hidden in this mode (it has its own composer).
 - **Read** (`ReadMode.tsx`): one source full-width in a reading column. Text is split into paragraphs and spans that carry `data-o` (absolute char offset), so a DOM selection maps back to source offsets (`absOffset`). Selecting text opens an anchored **margin thread** (`MarginThread.tsx`) placed level with the passage. Cards are pushed down to avoid overlap (`MarginColumn` layout effect). On narrow screens the active thread floats above the command bar.
 - **Library** also has a **Study sheets** view (`SheetsPanel.tsx`): study guide, briefing, FAQ, timeline, key terms, and a collapsible **concept map** tree. Inline `[n]` markers become citation chips via `lib/cite.ts`. The add-source box takes PDF / text / link-or-YouTube / lecture audio (record in the browser via `MediaRecorder`, or upload). Uploads use XHR for an upload progress bar. Processing sources show stage + progress, and `App.tsx` polls every 3 s while any source is processing.
 - **Summarise** (`SummariseMode.tsx`, rail Alt+3): pick sources (chips) or paste text (saved as a source so citations work), optional page range (single PDF) or topic, format + length. Shows background progress, a viewer with citations, and copy/print. The Library header has an **IB course + SL/HL picker** (`IBCoursePicker`). An `IBBadge` shows "Written for IB …" in Summarise and Practice.
@@ -120,7 +121,7 @@ The UI is **mode-based, not paneled**. One main surface at a time, switched from
 - **Command bar** (`CommandBar.tsx`, "Ask or make…", `/` to focus, a "Make" button for quick generation prompts). In Read mode it posts into the active margin thread, or a new unanchored one. In other modes the answer rises in a `ResponseSheet`.
 - **Citations**: answers are stored as text with `⟦n⟧` tokens (`lib/threads.ts`). `AnswerBody.tsx` is a tiny streaming-safe Markdown subset that turns tokens into numbered markers. Clicking one switches to Read, loads the source, scrolls to the span and flashes it (`Focus` in `App.tsx`).
 
-State lives in `App.tsx` (no global store). Threads are in-memory only and are **not persisted** in this MVP.
+State lives in `App.tsx` (no global store). **Conversations are saved per subject** (local engine): `db.threads` (v3), kinds `ask` / `sheet` / `margin`, `Thread.id` = the row's global `uid`. Switching subject loads that subject's threads (`api.threads`); `ask()` keeps a running copy (`cur`) and saves the finished answer even if the subject changed meanwhile; an effect saves other edits (mode switch, retries) by comparing a `signature`; `discardThread` deletes (+ tombstone). Threads sync through Drive (citations remapped via `chunk_ord`, margin threads' `source` by uid) and are reloaded on `marginalia:library-changed`. The laptop server engine keeps them in memory only.
 
 `NEXT_PUBLIC_API_URL` (default `http://localhost:8000`) points the browser straight at FastAPI. CORS is configured via `CORS_ORIGINS`. Streaming goes direct, not through a Next proxy, to avoid buffering.
 
@@ -162,5 +163,5 @@ Free-tier reality: the main model allows ~20 requests/day; the smoke test alone 
 - Whisper runs on CPU. If a GPU is available, `device="cuda"` in `transcribe._model` is ~10× faster.
 - No auth or users. No persistence of threads. No schema migrations (add Alembic before changing models).
 - Scanned PDFs (no text layer) are rejected. OCR isn't implemented.
-- Phone version: no Whisper (Gemini transcribes), no OCR, embeddings cost Gemini quota, Android may pause long jobs when the app is backgrounded (they resume on reopen). Threads still aren't persisted.
+- Phone version: no Whisper (Gemini transcribes), no OCR, embeddings cost Gemini quota, Android may pause long jobs when the app is backgrounded (they resume on reopen).
 - Next.js 16 note: `frontend/AGENTS.md` (auto-generated) says to read `node_modules/next/dist/docs/` before relying on remembered Next APIs.

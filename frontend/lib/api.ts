@@ -1,4 +1,5 @@
 import { localApi, streamChat as localStreamChat } from "./local/store";
+import type { Thread } from "./threads";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 /** "local" (default): everything on this device + Gemini with the student's key (phone app/PWA).
@@ -257,6 +258,10 @@ const serverApi = {
   /** PDFs up to 600 MB; parsed and indexed in the background after upload. */
   addPdf: (subjectId: number, file: File, onUpload?: (fraction: number) => void) =>
     uploadWithProgress<Source>(`/subjects/${subjectId}/sources/pdf`, file, file.name, onUpload),
+  // The laptop server keeps no saved conversations (threads stay in memory there).
+  threads: async (_subjectId: number): Promise<Thread[]> => [],
+  saveThread: async (_subjectId: number, _t: Thread): Promise<void> => {},
+  deleteThread: async (_uid: string): Promise<void> => {},
   /** The laptop server reads PDFs only; other formats are read by the on-device (phone/web) version. */
   addFile: (subjectId: number, file: File, onUpload?: (fraction: number) => void) =>
     /\.pdf$/i.test(file.name) || file.type === "application/pdf"
@@ -328,6 +333,8 @@ export type ChatPayload = {
   source_ids: number[];
   selection?: { source_id: number; text: string; start: number; end: number } | null;
   history?: { role: "user" | "assistant"; content: string }[];
+  /** "general": Ask AI's "Ask anything" (no sources, no citations). Default: from the checked sources. */
+  mode?: "sources" | "general";
 };
 
 /** Ask a question and invoke `onEvent` for each event (sources, text, cite, error, done) as it arrives. */

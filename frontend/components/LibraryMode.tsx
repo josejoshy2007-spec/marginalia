@@ -50,11 +50,14 @@ export default function LibraryMode(p: Props) {
     );
 
   return (
-    <div className="mx-auto max-w-5xl px-6 pt-10 sm:px-10">
+    <div className="mx-auto max-w-5xl px-4 pt-8 sm:px-10 sm:pt-10">
       {p.loadError && <ErrorNote text={p.loadError} onRetry={() => window.location.reload()} />}
       <header className="flex flex-wrap items-end justify-between gap-4 border-b border-line pb-6">
-        <div>
-          <p className="text-xs uppercase tracking-[0.18em] text-muted">Subject</p>
+        {/* min-w-0 + max-w-full: long names (subject, IB course) must never push the page wider than a phone. */}
+        <div className="min-w-0 max-w-full">
+          <p className="text-xs uppercase tracking-[0.18em] text-muted">
+            Subject{(p.subjects?.length ?? 0) > 1 ? ` · ${p.subjects!.length} on your shelf, tap the name to switch` : ""}
+          </p>
           <SubjectSwitcher {...p} />
           <IBCoursePicker subject={p.subject} onChanged={() => p.onSubjectsChanged()} />
         </div>
@@ -130,19 +133,23 @@ export default function LibraryMode(p: Props) {
 
 function SubjectSwitcher({ subjects, subject, onSelectSubject, onSubjectsChanged }: Props) {
   return (
-    <div className="flex items-center gap-3">
-      <select
-        aria-label="Current subject"
-        value={subject!.id}
-        onChange={(e) => onSelectSubject(Number(e.target.value))}
-        className="max-w-[70vw] cursor-pointer appearance-none bg-transparent font-display text-4xl leading-tight outline-none"
-      >
+    <div className="flex min-w-0 items-center gap-3">
+      <span className="relative min-w-0">
+        <select
+          aria-label="Current subject"
+          value={subject!.id}
+          onChange={(e) => onSelectSubject(Number(e.target.value))}
+          className="max-w-full cursor-pointer appearance-none truncate bg-transparent pr-8 font-display text-3xl leading-tight outline-none sm:text-4xl"
+        >
         {subjects!.map((s) => (
           <option key={s.id} value={s.id}>
             {s.name}
           </option>
         ))}
-      </select>
+        </select>
+        {/* The arrow says "this is a menu": switching subjects is how you get back to your other subjects. */}
+        <span aria-hidden className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-xl text-muted">▾</span>
+      </span>
       <button
         type="button"
         title="Delete this subject and its sources"

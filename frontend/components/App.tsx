@@ -8,8 +8,9 @@ import { scheduleReminder } from "@/lib/native";
 import SettingsSheet from "./SettingsSheet";
 import { useSyncStatus } from "./DriveSync";
 import { startAutoSync } from "@/lib/local/sync";
-import { addCitations, forRetry, newThreadId, stripCites, type Anchor, type Thread, type Turn } from "@/lib/threads";
-import Rail, { type Mode } from "./Rail";
+import { addCitations, forRetry, newThreadId, stripCites, threadTitle, type Anchor, type Thread, type Turn } from "@/lib/threads";
+import Rail, { MODES, type Mode } from "./Rail";
+import AskMode from "./AskMode";
 import LibraryMode from "./LibraryMode";
 import ReadMode from "./ReadMode";
 import CommandBar from "./CommandBar";
@@ -32,6 +33,10 @@ export default function App() {
   const [focus, setFocus] = useState<Focus | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [askActiveId, setAskActiveId] = useState<string | null>(null);
+  // Conversations are saved per subject: what's been saved (by content), and for which subject.
+  const saved = useRef(new Map<string, string>());
+  const threadsSubject = useRef<number | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const aborters = useRef(new Map<string, AbortController>());
@@ -88,7 +93,18 @@ export default function App() {
     const onChange = async () => {
       const list = await refreshSubjects();
       if (subjectId != null && !list.some((x) => x.id === subjectId)) setSubjectId(list[0]?.id ?? null);
-      else refreshSources();
+      else {
+        refreshSources();
+        if (subjectId != null) {
+          // Bring in conversations from other devices, keeping anything still being answered here.
+          const fresh = await api.threads(subjectId);
+          for (const t of fresh) saved.current.set(t.id, signature(t));
+          setThreads((ts) => {
+            const local = ts.filter((t) => t.busy || !t.turns.length);
+            return [...fresh.filter((f) => !local.some((l) => l.id === f.id)), ...local];
+          });
+        }
+      }
     };
     window.addEventListener("marginalia:library-changed", onChange);
     return () => window.removeEventListener("marginalia:library-changed", onChange);
@@ -99,21 +115,47 @@ export default function App() {
     try {
       localStorage.setItem(LS_SUBJECT, String(subjectId));
     } catch {}
+    // Switching subjects swaps conversations; they're saved per subject, not thrown away.
     setThreads([]);
     setActiveThreadId(null);
+    setAskActiveId(null);
     setSheetOpen(false);
     setReadSourceId(null);
     refreshSources();
+    threadsSubject.current = null;
+    let stale = false;
+    api.threads(subjectId).then((ts) => {
+      if (stale) return;
+      saved.current = new Map(ts.map((t) => [t.id, signature(t)]));
+      threadsSubject.current = subjectId;
+      setThreads(ts);
+    });
+    return () => {
+      stale = true;
+    };
   }, [subjectId, refreshSources]);
 
-  // Alt+1..4 switches modes.
+  // Save conversations whose content changed (a mode switch, a cleared or retried answer…).
+  // Answers themselves are saved by ask() when they finish, even after a subject switch.
   useEffect(() => {
-    const modes: Mode[] = ["library", "read", "summarise", "practice", "listen"];
+    const sid = threadsSubject.current;
+    if (sid == null) return;
+    for (const t of threads) {
+      if (t.busy || !t.turns.length) continue;
+      const sig = signature(t);
+      if (saved.current.get(t.id) === sig) continue;
+      saved.current.set(t.id, sig);
+      api.saveThread(sid, t).catch(() => saved.current.delete(t.id));
+    }
+  }, [threads]);
+
+  // Alt+1..6 switches modes (each mode's key is shown in the rail).
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const i = Number(e.key) - 1;
-      if (e.altKey && i >= 0 && i < modes.length) {
+      const hit = e.altKey ? MODES.find((m) => m.key === e.key) : undefined;
+      if (hit) {
         e.preventDefault();
-        setMode(modes[i]);
+        setMode(hit.id);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -152,6 +194,8 @@ export default function App() {
   const ask = useCallback(
     async (thread: Thread, message: string) => {
       if (subjectId == null || thread.busy) return;
+      const sid = subjectId;
+      const general = thread.mode === "general";
       const history = thread.turns.map((t) =>
         t.role === "user"
           ? { role: "user" as const, content: t.text }
@@ -162,38 +206,59 @@ export default function App() {
           ? { source_id: thread.sourceId, ...thread.anchor }
           : null;
 
-      setThreads((ts) => {
-        const updated: Thread = {
-          ...thread,
-          busy: true,
-          turns: [...thread.turns, { role: "user", text: message }, { role: "assistant", body: "", citations: [] }],
-        };
-        return ts.some((t) => t.id === thread.id) ? ts.map((t) => (t.id === thread.id ? updated : t)) : [...ts, updated];
-      });
+      const stamp = new Date().toISOString();
+      // `cur` mirrors the thread as it streams, so the finished answer is saved even if the student
+      // has switched subject (and this thread has left the screen) in the meantime.
+      let cur: Thread = {
+        ...thread,
+        busy: true,
+        createdAt: thread.createdAt ?? stamp,
+        updatedAt: stamp,
+        turns: [...thread.turns, { role: "user", text: message }, { role: "assistant", body: "", citations: [] }],
+      };
+      if (thread.kind === "ask" && !thread.title) cur = { ...cur, title: threadTitle(cur) };
+      setThreads((ts) => (ts.some((t) => t.id === thread.id) ? ts.map((t) => (t.id === thread.id ? cur : t)) : [...ts, cur]));
+      const lastTurn = (fn: (t: Extract<Turn, { role: "assistant" }>) => Turn) => {
+        const turns = [...cur.turns];
+        const last = turns[turns.length - 1];
+        if (last?.role === "assistant") turns[turns.length - 1] = fn(last);
+        cur = { ...cur, turns };
+        patchLastTurn(thread.id, fn);
+      };
 
       const ctrl = new AbortController();
       aborters.current.set(thread.id, ctrl);
       try {
         await streamChat(
-          subjectId,
-          { message, source_ids: checkedIds, selection, history },
+          sid,
+          {
+            message,
+            source_ids: general ? [] : checkedIds,
+            selection: general ? null : selection,
+            history,
+            mode: general ? "general" : "sources",
+          },
           (e) => {
-            if (e.type === "text") patchLastTurn(thread.id, (t) => ({ ...t, body: t.body + e.text }));
+            if (e.type === "text") lastTurn((t) => ({ ...t, body: t.body + e.text }));
             else if (e.type === "cite")
-              patchLastTurn(thread.id, (t) => {
+              lastTurn((t) => {
                 const { citations, tokens } = addCitations(t.citations, e.citations);
                 return { ...t, citations, body: t.body + tokens };
               });
-            else if (e.type === "error") patchLastTurn(thread.id, (t) => ({ ...t, error: e.message }));
+            else if (e.type === "error") lastTurn((t) => ({ ...t, error: e.message }));
           },
           ctrl.signal,
         );
       } catch (err) {
-        if ((err as Error).name !== "AbortError")
-          patchLastTurn(thread.id, (t) => ({ ...t, error: (err as Error).message || "Request failed" }));
+        if ((err as Error).name !== "AbortError") lastTurn((t) => ({ ...t, error: (err as Error).message || "Request failed" }));
       } finally {
         aborters.current.delete(thread.id);
+        cur = { ...cur, busy: false };
         patchThread(thread.id, (t) => ({ ...t, busy: false }));
+        if (!ctrl.signal.aborted) {
+          saved.current.set(cur.id, signature(cur));
+          api.saveThread(sid, cur).catch(() => saved.current.delete(cur.id));
+        }
       }
     },
     [subjectId, checkedIds, patchLastTurn, patchThread],
@@ -201,6 +266,8 @@ export default function App() {
 
   const discardThread = useCallback((id: string) => {
     aborters.current.get(id)?.abort();
+    saved.current.delete(id);
+    api.deleteThread(id).catch(() => {});
     setThreads((ts) => ts.filter((t) => t.id !== id));
     setActiveThreadId((a) => (a === id ? null : a));
   }, []);
@@ -279,7 +346,7 @@ export default function App() {
       />
 
       <main className="relative flex min-w-0 flex-1 flex-col">
-        <div className="min-h-0 flex-1 overflow-y-auto pb-40" id="mode-scroll">
+        <div className={`min-h-0 flex-1 overflow-y-auto ${mode === "ask" ? "" : "pb-40"}`} id="mode-scroll">
           {mode === "library" && (
             <LibraryMode
               subjects={subjects}
@@ -316,6 +383,25 @@ export default function App() {
               onGoLibrary={() => setMode("library")}
             />
           )}
+          {mode === "ask" && subjectId != null && (
+            <AskMode
+              threads={threads}
+              activeId={askActiveId}
+              setActiveId={setAskActiveId}
+              onAsk={ask}
+              onSetMode={(t, m) => patchThread(t.id, (x) => ({ ...x, mode: m }))}
+              onDelete={discardThread}
+              onRetry={(t) => {
+                const r = forRetry(t);
+                if (r) ask(r.trimmed, r.question);
+              }}
+              onCite={onCite}
+              checkedCount={checkedIds.length}
+              totalCount={sources.length}
+              onGoLibrary={() => setMode("library")}
+              generalAvailable={ENGINE === "local"}
+            />
+          )}
           {mode === "summarise" && subjectId != null && (
             <SummariseMode key={subjectId} {...studyProps(subjectId)} />
           )}
@@ -325,7 +411,7 @@ export default function App() {
           {mode === "listen" && subjectId != null && <ListenMode key={subjectId} {...studyProps(subjectId)} />}
         </div>
 
-        {sheetOpen && sheetThread && mode !== "read" && (
+        {sheetOpen && sheetThread && mode !== "read" && mode !== "ask" && (
           <ResponseSheet
             thread={sheetThread}
             onCite={onCite}
@@ -341,7 +427,7 @@ export default function App() {
           />
         )}
 
-        {subject && (
+        {subject && mode !== "ask" && (
           <CommandBar
             disabled={subjectId == null}
             busy={(mode === "read" ? readerTarget?.busy : sheetThread?.busy) ?? false}
@@ -377,4 +463,9 @@ export default function App() {
       )}
     </div>
   );
+}
+
+/** What a conversation's saved copy depends on (to skip saving unchanged ones). */
+function signature(t: Thread): string {
+  return JSON.stringify([t.turns, t.mode ?? "sources", t.title ?? "", t.anchor ?? null, t.sourceId ?? null]);
 }

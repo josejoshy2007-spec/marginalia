@@ -8,9 +8,15 @@ export type Turn =
   | { role: "assistant"; body: string; citations: Citation[]; error?: string };
 
 export type Thread = {
+  /** Also the saved conversation's global uid, so it's the same on every synced device. */
   id: string;
-  /** "margin" threads live beside a source in Read mode; "sheet" threads answer the command bar elsewhere. */
-  kind: "margin" | "sheet";
+  /** "margin": beside a source in Read mode; "sheet": the bottom bar's quick answers; "ask": an Ask AI chat. */
+  kind: "margin" | "sheet" | "ask";
+  /** Answer from the checked sources (default) or from general knowledge (Ask AI's "Ask anything"). */
+  mode?: "sources" | "general";
+  title?: string;
+  createdAt?: string;
+  updatedAt?: string;
   sourceId?: number;
   anchor?: Anchor | null;
   turns: Turn[];
@@ -30,7 +36,16 @@ export function forRetry(thread: Thread): { trimmed: Thread; question: string } 
 }
 
 export function newThreadId() {
-  return Math.random().toString(36).slice(2, 10);
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
+
+/** A short title from the first question. */
+export function threadTitle(t: Thread): string {
+  const first = t.turns.find((x) => x.role === "user");
+  const q = first?.role === "user" ? first.text.replace(/\s+/g, " ").trim() : "";
+  return t.title || (q ? q.slice(0, 70) + (q.length > 70 ? "…" : "") : "New conversation");
 }
 
 /** Add citations to an answer, reusing numbers for identical passages, and return the tokens to append. */

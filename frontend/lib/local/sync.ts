@@ -41,8 +41,13 @@ export async function snapshotLocal(): Promise<Library> {
   const artUid = new Map(artifacts.map((a) => [a.id!, a.uid!]));
   const chunkOrd = new Map<number, number>();
   const cited = new Set<number>();
+  const threads = (await db.threads.toArray()).filter((t) => subjectUid.has(t.subject_id));
   for (const a of artifacts) for (const p of a.passages) cited.add(p.chunk_id);
+  for (const t of threads) for (const turn of t.turns as any[]) for (const c of turn.citations ?? []) cited.add(c.chunk_id);
   for (const c of await db.chunks.bulkGet([...cited])) if (c) chunkOrd.set(c.id!, c.ord);
+  const toRemote = ({ source_id, chunk_id, ...p }: any) => ({
+    ...p, source: sourceUid.get(source_id) ?? null, chunk_ord: chunkOrd.get(chunk_id) ?? null,
+  });
 
   const cards = (await db.cards.toArray()).filter((c) => artUid.has(c.deck_id));
   const attempts = (await db.attempts.toArray()).filter((t) => artUid.has(t.quiz_id));
@@ -63,12 +68,17 @@ export async function snapshotLocal(): Promise<Library> {
         params: Array.isArray(params.source_ids)
           ? { ...params, source_ids: (params.source_ids as number[]).map((x) => sourceUid.get(x)).filter(Boolean) }
           : params,
-        passages: passages.map(({ source_id, chunk_id, ...p }) => ({
-          ...p, source: sourceUid.get(source_id) ?? null, chunk_ord: chunkOrd.get(chunk_id) ?? null,
-        })),
+        passages: passages.map(toRemote),
       }) as Rec),
     cards: cards.map(({ deck_id, ...c }) => ({ ...strip(c), deck: artUid.get(deck_id) }) as Rec),
     attempts: attempts.map(({ quiz_id, ...t }) => ({ ...strip(t), quiz: artUid.get(quiz_id) }) as Rec),
+    // Conversations: a margin thread's source and every citation point at sources by uid.
+    threads: threads.map(({ subject_id, source_id, turns, ...t }) => ({
+      ...strip(t),
+      subject: subjectUid.get(subject_id),
+      source: source_id != null ? (sourceUid.get(source_id) ?? null) : null,
+      turns: (turns as any[]).map((turn) => (turn.citations ? { ...turn, citations: turn.citations.map(toRemote) } : turn)),
+    }) as Rec),
     tombstones: await db.tombstones.toArray(),
   };
 }
@@ -80,6 +90,7 @@ const PARENT: Partial<Record<SyncedTable, [string, SyncedTable]>> = {
   artifacts: ["subject", "subjects"],
   cards: ["deck", "artifacts"],
   attempts: ["quiz", "artifacts"],
+  threads: ["subject", "subjects"],
 };
 
 /** Union of two libraries: newer row wins, tombstones win, orphans are dropped. */
@@ -101,7 +112,7 @@ export function merge(a: Library, b: Library | null): Library {
     out[table] = [...rows.values()];
   }
   // Drop rows whose parent is gone (in dependency order: subjects → sources/artifacts → cards/attempts).
-  for (const table of ["sources", "artifacts", "cards", "attempts"] as SyncedTable[]) {
+  for (const table of ["sources", "artifacts", "cards", "attempts", "threads"] as SyncedTable[]) {
     const [field, parent] = PARENT[table]!;
     const alive = new Set(out[parent].map((r) => r.uid));
     out[table] = out[table].filter((r) => alive.has(r[field]));
@@ -248,10 +259,36 @@ export async function applyLibrary(lib: Library, local: Library, fetchContent: (
       else (await db.attempts.update(cur.id, { ...rest, quiz_id: quiz.id }), res.updated++);
     }
 
+    // Conversations (citations and a margin thread's source are remapped to this device's ids).
+    const threads = await uidMap("threads");
+    for (const r of lib.threads ?? []) {
+      const cur = threads.get(r.uid);
+      const subject = subjects.get(r.subject);
+      if (!subject || (cur && !newer(cur, r))) continue;
+      const turns = [];
+      for (const turn of r.turns ?? []) {
+        if (!turn.citations) {
+          turns.push(turn);
+          continue;
+        }
+        const citations = [];
+        for (const { source, chunk_ord, ...c } of turn.citations) {
+          const sid = sources.get(source)?.id ?? -1;
+          citations.push({ ...c, source_id: sid, chunk_id: await chunkId(sid, chunk_ord) });
+        }
+        turns.push({ ...turn, citations });
+      }
+      const { subject: _s, source, ...rest } = r;
+      const row = { ...rest, subject_id: subject.id, source_id: source ? (sources.get(source)?.id ?? null) : null, turns };
+      if (!cur) (await db.threads.add(row as any), res.added++);
+      else (await db.threads.update(cur.id, row), res.updated++);
+    }
+
     // Removals: rows that were in this device's snapshot but aren't in the merged library
     // (deleted on another device, or their parent was). Children go with their parents.
     const keep = (t: SyncedTable) => new Set(lib[t].map((r) => r.uid));
     for (const [table, del] of [
+      ["threads", (id: number) => db.threads.delete(id)],
       ["artifacts", localApi.deleteArtifact],
       ["sources", localApi.deleteSource],
       ["subjects", localApi.deleteSubject],

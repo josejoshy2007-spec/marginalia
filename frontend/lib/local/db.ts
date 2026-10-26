@@ -17,8 +17,10 @@ export interface Synced {
   updated_at?: string;
 }
 
-export type SyncedTable = "subjects" | "sources" | "artifacts" | "cards" | "attempts";
-export const SYNCED_TABLES: SyncedTable[] = ["subjects", "sources", "artifacts", "cards", "attempts"];
+export type SyncedTable = "subjects" | "sources" | "artifacts" | "cards" | "attempts" | "threads";
+export const SYNCED_TABLES: SyncedTable[] = ["subjects", "sources", "artifacts", "cards", "attempts", "threads"];
+/** Tables that existed when v2 added uid/updated_at (the v2 upgrade must only touch these). */
+const V2_TABLES: SyncedTable[] = ["subjects", "sources", "artifacts", "cards", "attempts"];
 
 /** A deleted row, remembered so the deletion reaches other devices. */
 export interface TombstoneRow {
@@ -102,6 +104,22 @@ export interface CardRow extends Synced {
   last_reviewed_at: string | null;
 }
 
+/**
+ * A saved conversation: an Ask AI chat ("ask"), the bottom bar's quick answers ("sheet"), or a
+ * margin note thread beside a source in Read mode ("margin"). `uid` doubles as the UI's thread id.
+ */
+export interface ThreadRow extends Synced {
+  id?: number;
+  subject_id: number;
+  kind: "ask" | "sheet" | "margin";
+  mode: "sources" | "general"; // answered from the checked sources, or general knowledge
+  title: string;
+  source_id: number | null; // margin threads: the source they sit beside
+  anchor: { start: number; end: number; text: string } | null;
+  turns: unknown[]; // lib/threads.ts Turn[] (assistant turns carry Citation[])
+  created_at: string;
+}
+
 export interface AttemptRow extends Synced {
   id?: number;
   quiz_id: number;
@@ -132,6 +150,7 @@ class StudyDB extends Dexie {
   blobs!: Table<BlobRow, string>;
   settings!: Table<SettingRow, string>;
   tombstones!: Table<TombstoneRow, string>;
+  threads!: Table<ThreadRow, number>;
 
   constructor() {
     super("marginalia");
@@ -156,12 +175,14 @@ class StudyDB extends Dexie {
         tombstones: "uid, table",
       })
       .upgrade(async (tx) => {
-        for (const t of SYNCED_TABLES)
+        for (const t of V2_TABLES)
           await tx.table(t).toCollection().modify((row: Synced & { created_at?: string }) => {
             row.uid ??= newUid();
             row.updated_at ??= row.created_at ?? now();
           });
       });
+    // v3: saved conversations (Ask AI, quick answers, margin threads), synced like everything else.
+    this.version(3).stores({ threads: "++id, subject_id, &uid" });
     for (const t of SYNCED_TABLES) {
       const table = this.table(t);
       table.hook("creating", (_key, obj: Synced) => {

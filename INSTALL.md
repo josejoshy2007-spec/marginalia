@@ -119,6 +119,14 @@ The app needs its own Google sign-in "client ID". Do this on a computer, signed 
 While the app is in "Testing" mode, only the test users from step 3 can sign in. Google may show
 "Google hasn't verified this app". Tap **Continue**; it's your own app.
 
+## Subjects and Ask AI
+
+Each subject keeps its own sources, study items **and conversations**. Switch subjects from the
+subject name at the top of the Library (tap it: it's a menu). **Ask AI** in the left rail lists your saved
+conversations for the subject. Use **From my sources** for answers with links to the exact passage,
+or **Ask anything** for general help that isn't limited to your sources (double-check those against
+your notes). Conversations sync between devices with Google Drive like everything else.
+
 ## What you can add
 
 PDFs, PowerPoint (.pptx), Word (.docx), Excel (.xlsx) and CSV, OpenDocument (.odp/.odt/.ods), EPUB

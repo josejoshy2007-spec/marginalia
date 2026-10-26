@@ -1,12 +1,13 @@
 "use client";
 
-import { CondenseIcon, DialIcon, LensIcon, ShelfIcon, TargetIcon, WaveIcon } from "./icons";
+import { AskIcon, CondenseIcon, DialIcon, LensIcon, ShelfIcon, TargetIcon, WaveIcon } from "./icons";
 
-export type Mode = "library" | "read" | "summarise" | "practice" | "listen";
+export type Mode = "library" | "read" | "ask" | "summarise" | "practice" | "listen";
 
-const MODES: { id: Mode; label: string; Icon: typeof ShelfIcon; key: string }[] = [
+export const MODES: { id: Mode; label: string; Icon: typeof ShelfIcon; key: string }[] = [
   { id: "library", label: "Library", Icon: ShelfIcon, key: "1" },
   { id: "read", label: "Read", Icon: LensIcon, key: "2" },
+  { id: "ask", label: "Ask AI", Icon: AskIcon, key: "6" },
   { id: "summarise", label: "Summarise", Icon: CondenseIcon, key: "3" },
   { id: "practice", label: "Practice", Icon: TargetIcon, key: "4" },
   { id: "listen", label: "Listen", Icon: WaveIcon, key: "5" },
