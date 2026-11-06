@@ -48,8 +48,8 @@ jobs:
       - name: App icons and splash screen
         run: >
           npx --yes @capacitor/assets@3 generate --android
-          --iconBackgroundColor '#1e2427' --iconBackgroundColorDark '#1e2427'
-          --splashBackgroundColor '#f5f0e6' --splashBackgroundColorDark '#1b1a17'
+          --iconBackgroundColor '#0e1016' --iconBackgroundColorDark '#0e1016'
+          --splashBackgroundColor '#0e1016' --splashBackgroundColorDark '#0e1016'
 
       - name: Copy into the Android project
         run: npx cap sync android
