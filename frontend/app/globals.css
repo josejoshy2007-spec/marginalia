@@ -1,44 +1,48 @@
 @import "tailwindcss";
 
-/* Warm "paper and ink" palette. Light by default, dark follows the OS. */
+/* "Nebula Amber": dark navy with one amber accent. Dark is the default; Settings → Appearance can
+   switch to light (lib/theme.ts sets data-theme="light" on <html>). The token names are the ones the
+   components already use, so restyling is done here. */
 :root {
-  --paper: #f5f0e6;
-  --rail: #efe8da;
-  --card: #fffdf8;
-  --sunken: #ede6d8;
-  --line: #ddd3c1;
-  --ink: #1e2427;
-  --ink-soft: #2c3336;
-  --muted: #7a7064;
-  --accent: #b5472a;
-  --accent-soft: #f6e1d8;
-  --moss: #4f6d4a;
-  --danger: #a3261b;
-  --danger-soft: #f7dcd7;
-  --hl-anchor: #f1dd9e;
-  --hl-anchor-active: #ebc65d;
-  --hl-focus: #f5b79f;
+  color-scheme: dark;
+  --paper: #0e1016;
+  --rail: #0b0d12;
+  --card: #161925;
+  --sunken: #1c2030;
+  --line: #252a3a;
+  --ink: #e7e9f2;
+  --ink-soft: #c9ccd8;
+  --muted: #8a90a6;
+  --accent: #f2b13c;
+  --accent-soft: #3a2e15;
+  --on-accent: #0e1016;
+  --moss: #4cc38a;
+  --danger: #ff6b6b;
+  --danger-soft: #3a1c20;
+  --hl-anchor: #4a3a16;
+  --hl-anchor-active: #6b5216;
+  --hl-focus: #7a5a10;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #1b1a17;
-    --rail: #171613;
-    --card: #23221e;
-    --sunken: #2c2a25;
-    --line: #3a3731;
-    --ink: #ece6da;
-    --ink-soft: #d9d2c4;
-    --muted: #9b9184;
-    --accent: #e0805f;
-    --accent-soft: #3d2a22;
-    --moss: #8bab7f;
-    --danger: #ef8a7c;
-    --danger-soft: #3c2320;
-    --hl-anchor: #5a4a1f;
-    --hl-anchor-active: #7a6220;
-    --hl-focus: #7a3d28;
-  }
+:root[data-theme="light"] {
+  color-scheme: light;
+  --paper: #f4f5f8;
+  --rail: #eceef3;
+  --card: #ffffff;
+  --sunken: #e8eaf0;
+  --line: #d9dce5;
+  --ink: #12141c;
+  --ink-soft: #2a2e3b;
+  --muted: #626a80;
+  --accent: #9a6200;
+  --accent-soft: #fbecd0;
+  --on-accent: #ffffff;
+  --moss: #1f8a57;
+  --danger: #c52a2a;
+  --danger-soft: #fbe1e1;
+  --hl-anchor: #fde9b8;
+  --hl-anchor-active: #fbd77a;
+  --hl-focus: #f9c95c;
 }
 
 @theme inline {
@@ -52,13 +56,22 @@
   --color-muted: var(--muted);
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
   --color-moss: var(--moss);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
   --font-sans: var(--font-ui), ui-sans-serif, system-ui, sans-serif;
-  --font-display: var(--font-display-face), Georgia, serif;
+  --font-display: var(--font-ui), ui-sans-serif, system-ui, sans-serif;
   --font-reading: var(--font-reading-face), Georgia, serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* 4px corners everywhere (no pills, nothing bubbly). */
+  --radius-xs: 4px;
+  --radius-sm: 4px;
+  --radius-md: 4px;
+  --radius-lg: 4px;
+  --radius-xl: 4px;
+  --radius-2xl: 4px;
+  --radius-3xl: 4px;
 }
 
 /* Safe areas: the Android app is edge-to-edge (viewport-fit=cover), so pad for the status bar,
@@ -122,7 +135,7 @@ body {
   margin: 0 1px 0 2px;
   padding: 0 4px;
   vertical-align: 0.2em;
-  border-radius: 999px;
+  border-radius: 4px;
   background: var(--accent-soft);
   color: var(--accent);
   font: 600 0.66rem/1 var(--font-sans);
@@ -132,7 +145,7 @@ body {
 .cite-marker:hover,
 .cite-marker:focus-visible {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   outline: none;
 }
 
@@ -163,9 +176,9 @@ body {
 
 /* ---------- small primitives ---------- */
 .field {
-  border-radius: 0.75rem;
+  border-radius: 4px;
   border: 1px solid var(--line);
-  background: var(--paper);
+  background: var(--card);
   padding: 0.55rem 0.8rem;
   outline: none;
 }
@@ -173,9 +186,9 @@ body {
   border-color: var(--accent);
 }
 .btn-primary {
-  border-radius: 999px;
-  background: var(--ink);
-  color: var(--paper);
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--on-accent);
   padding: 0.5rem 1.1rem;
   font-weight: 500;
   font-size: 0.92rem;
@@ -187,7 +200,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  border-radius: 999px;
+  border-radius: 4px;
   border: 1px solid var(--line);
   padding: 0.4rem 0.9rem;
   font-size: 0.9rem;
@@ -202,4 +215,22 @@ select option {
   background: var(--card);
   color: var(--ink);
   font-size: 1rem;
+}
+
+/* Headings: Inter, a little heavier and tighter than body text. */
+.font-display {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+/* Keyboard focus is always visible, in the accent colour. */
+button:focus-visible,
+a:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[role="radio"]:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
