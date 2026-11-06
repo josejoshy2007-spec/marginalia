@@ -153,7 +153,7 @@ Free-tier reality: the main model allows ~20 requests/day; the smoke test alone 
 
 ## Design constraints
 
-- Must **not** resemble NotebookLM: no three-column sources/chat/studio layout, no borrowed feature names ("Notebook", "Studio", "Audio Overview", …), no Google-style blue/white look. Current identity: "Marginalia", warm paper/ink palette, terracotta accent, Fraunces display + Literata reading + Public Sans UI.
+- Must **not** resemble NotebookLM: no three-column sources/chat/studio layout, no borrowed feature names ("Notebook", "Studio", "Audio Overview", …), no Google-style blue/white look. Current identity ("Nebula Amber", spec in `docs/superpowers/specs/2026-11-06-ui-overhaul-design.md`): dark navy `#0e1016` by default with one amber accent `#f2b13c`, **4px corners everywhere (no pills: the student finds pill/bubbly shapes "look like AI")**, flat cards with 1px borders, Inter for UI and headings (`font-display` = Inter 600), Literata (`font-reading`) only for long reading. Colours are the CSS variables in `app/globals.css` (`paper, card, sunken, line, ink, muted, accent, on-accent, moss, danger…`); light values live under `:root[data-theme="light"]`, switched in Settings → Appearance via `lib/theme.ts` (`THEME_BOOTSTRAP` in `<head>` prevents a flash; Android bar icons follow via `SystemBars`). Text on any coloured fill uses `text-on-accent`, never white. `npm run test:style -- --components` enforces these rules; `npm run test:theme` covers the switch; icons/splash come from `scripts/make-icons.py` (checked by `scripts/icon_test.py`).
 - Keep the mode-switch model: new features become modes or overlays, not permanent side panels.
 
 ## Known gaps / next steps

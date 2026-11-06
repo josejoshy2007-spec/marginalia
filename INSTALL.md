@@ -119,6 +119,11 @@ The app needs its own Google sign-in "client ID". Do this on a computer, signed 
 While the app is in "Testing" mode, only the test users from step 3 can sign in. Google may show
 "Google hasn't verified this app". Tap **Continue**; it's your own app.
 
+## Dark or light
+
+The app is dark by default. For a light version (bright rooms, daytime reading), open
+**Settings → Appearance → Light**. Each device remembers its own choice.
+
 ## Subjects and Ask AI
 
 Each subject keeps its own sources, study items **and conversations**. Switch subjects from the
