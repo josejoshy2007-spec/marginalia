@@ -43,9 +43,9 @@ values, so components keep working:
 | `--ink-soft` | `#c9ccd8` | `#2a2e3b` | long-reading text |
 | `--muted` | `#8a90a6` | `#626a80` | secondary text, icons |
 | `--accent` | `#f2b13c` | `#9a6200` | the one accent: primary button, active rail item, citations, focus |
-| `--accent-soft` | `#3a2e15` | `#fbecd0` | tinted accent backgrounds |
+| `--accent-soft` | `#3a2e15` | `#fdf3e1` | tinted accent backgrounds |
 | `--on-accent` (new) | `#0e1016` | `#ffffff` | text on accent fills |
-| `--moss` | `#4cc38a` | `#1f8a57` | success / correct |
+| `--moss` | `#4cc38a` | `#1a7a4c` | success / correct |
 | `--danger` | `#ff6b6b` | `#c52a2a` | errors / wrong |
 | `--danger-soft` | `#3a1c20` | `#fbe1e1` | error backgrounds |
 | `--hl-anchor` | `#4a3a16` | `#fde9b8` | Read-mode anchor highlight |

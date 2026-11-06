@@ -55,7 +55,7 @@ export default function LibraryMode(p: Props) {
       <header className="flex flex-wrap items-end justify-between gap-4 border-b border-line pb-6">
         {/* min-w-0 + max-w-full: long names (subject, IB course) must never push the page wider than a phone. */}
         <div className="min-w-0 max-w-full">
-          <p className="text-xs uppercase tracking-[0.18em] text-muted">
+          <p className="text-[11px] uppercase tracking-[0.12em] text-muted">
             Subject{(p.subjects?.length ?? 0) > 1 ? ` · ${p.subjects!.length} on your shelf, tap the name to switch` : ""}
           </p>
           <SubjectSwitcher {...p} />
@@ -110,8 +110,8 @@ export default function LibraryMode(p: Props) {
                 <div key={title}>
                   <div className="mb-3 flex items-center gap-2 border-b border-line pb-2">
                     <Icon width={16} height={16} className="text-muted" />
-                    <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-ink-soft">{title}</h3>
-                    <span className="rounded-full bg-sunken px-2 text-xs text-muted">{items.length}</span>
+                    <h3 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-soft">{title}</h3>
+                    <span className="rounded bg-sunken px-2 text-xs text-muted">{items.length}</span>
                     <span className="ml-auto hidden text-xs text-muted sm:inline">{blurb}</span>
                   </div>
                   <ul className="grid gap-3 sm:grid-cols-2">
@@ -264,8 +264,8 @@ function AddSource({ subjectId, onAdded }: { subjectId: number; onAdded: () => P
             key={id}
             type="button"
             onClick={() => setTab(id)}
-            className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-sm transition-colors ${
-              tab === id ? "bg-ink text-paper" : "text-muted hover:bg-sunken hover:text-ink"
+            className={`flex items-center gap-1.5 rounded px-3 py-1 text-sm transition-colors ${
+              tab === id ? "bg-accent text-on-accent" : "text-muted hover:bg-sunken hover:text-ink"
             }`}
           >
             <Icon width={15} height={15} /> {label}
@@ -415,7 +415,7 @@ function SourceCard({ source: s, setSources, onSourcesChanged, onOpen }: Props &
           }}
           className="peer sr-only"
         />
-        <span className="grid h-5 w-5 place-items-center rounded-md border border-muted text-[11px] text-paper peer-checked:border-moss peer-checked:bg-moss peer-focus-visible:ring-2 peer-focus-visible:ring-accent">
+        <span className="grid h-5 w-5 place-items-center rounded-md border border-muted text-[11px] text-on-accent peer-checked:border-accent peer-checked:bg-accent peer-focus-visible:ring-2 peer-focus-visible:ring-accent">
           {s.checked ? "✓" : ""}
         </span>
       </label>
@@ -529,7 +529,7 @@ function AudioInput({ disabled, onAudio }: { disabled: boolean; onAudio: (b: Blo
           recording ? "border-danger bg-danger-soft text-danger" : "border-dashed border-line hover:border-muted"
         }`}
       >
-        <span className={`h-3 w-3 rounded-full ${recording ? "animate-pulse bg-danger" : "bg-accent"}`} />
+        <span aria-hidden className={`h-3 w-3 rounded-full ${recording ? "animate-pulse bg-danger" : "bg-accent"}`} />
         <span className="font-medium">{recording ? `Stop and transcribe · ${mmss}` : "Record a lecture"}</span>
       </button>
       <button
@@ -587,7 +587,7 @@ function IBCoursePicker({ subject, onChanged }: { subject: Subject; onChanged: (
         value={course}
         disabled={saving}
         onChange={(e) => save({ ib_course: e.target.value })}
-        className="min-w-0 max-w-full cursor-pointer truncate rounded-full border border-line bg-card px-3 py-1 outline-none hover:border-muted"
+        className="min-w-0 max-w-full cursor-pointer truncate rounded border border-line bg-card px-3 py-1 outline-none hover:border-muted"
       >
         <option value="">Not an IB subject</option>
         {course && !courses.includes(course) && <option value={course}>{course}</option>}

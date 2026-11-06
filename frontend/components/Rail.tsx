@@ -32,7 +32,7 @@ export default function Rail({
       className="flex w-[68px] shrink-0 flex-col items-center gap-1 border-r border-line bg-rail py-4"
     >
       <div
-        className="mb-5 grid h-9 w-9 place-items-center rounded-full bg-ink font-display text-lg italic text-paper"
+        className="mb-5 grid h-9 w-9 place-items-center rounded bg-card font-display text-lg text-accent ring-1 ring-line"
         title="Marginalia"
       >
         m
@@ -57,7 +57,7 @@ export default function Rail({
             />
             <span
               className={`grid h-9 w-9 place-items-center rounded-xl transition-colors ${
-                active ? "bg-card shadow-sm ring-1 ring-line" : "group-hover:bg-card/60"
+                active ? "bg-card text-accent ring-1 ring-line" : "group-hover:bg-card/60"
               }`}
             >
               <Icon />

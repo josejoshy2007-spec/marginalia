@@ -387,7 +387,7 @@ function Markscheme({ q, result }: { q: ExamQuestion; result: MarkResult | null 
               <li key={i} className="flex items-start gap-2">
                 <span
                   className={`mt-0.5 grid h-5 min-w-5 shrink-0 place-items-center rounded px-1 text-[11px] font-semibold ${
-                    !r ? "bg-sunken text-muted" : r.awarded > 0 ? "bg-moss text-white" : "bg-danger-soft text-danger"
+                    !r ? "bg-sunken text-muted" : r.awarded > 0 ? "bg-moss text-on-accent" : "bg-danger-soft text-danger"
                   }`}
                 >
                   {r ? (r.awarded > 0 ? `✓${r.awarded}` : "✗") : `[${pt.marks}]`}

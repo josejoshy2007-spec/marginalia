@@ -65,21 +65,21 @@ export default function CommandBar(p: Props) {
                 key={m.label}
                 type="button"
                 onClick={() => send(m.prompt)}
-                className="rounded-full border border-line bg-card px-3 py-1 text-sm shadow-sm hover:border-accent hover:text-accent"
+                className="rounded border border-line bg-card px-3 py-1 text-sm hover:border-accent hover:text-accent"
               >
                 {m.label}
               </button>
             ))}
           </div>
         )}
-        <div className="command-bar rounded-[22px] border border-line bg-card/95 p-2 shadow-[0_10px_40px_-12px_rgba(40,30,20,.35)] backdrop-blur">
+        <div className="command-bar rounded border border-line bg-card/95 p-2 shadow-[0_12px_40px_-12px_rgba(0,0,0,.6)] backdrop-blur">
           <div className="flex items-center gap-2 px-2 pb-1 text-[11px] text-muted">
             <span className="inline-flex items-center gap-1">
               <span className={`h-1.5 w-1.5 rounded-full ${p.checkedCount ? "bg-moss" : "bg-danger"}`} />
               {scope}
             </span>
             {p.focusLabel && (
-              <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-accent-soft px-2 py-0.5 text-accent">
+              <span className="inline-flex min-w-0 items-center gap-1 rounded bg-accent-soft px-2 py-0.5 text-accent">
                 <span className="truncate">{p.focusLabel}</span>
                 {p.onClearFocus && (
                   <button type="button" onClick={p.onClearFocus} title="Ask about the whole source instead">
@@ -104,8 +104,8 @@ export default function CommandBar(p: Props) {
             <button
               type="button"
               onClick={() => setShowMakers((s) => !s)}
-              className={`mb-0.5 shrink-0 rounded-full px-3 py-1.5 text-sm transition-colors ${
-                showMakers ? "bg-ink text-paper" : "bg-sunken text-ink hover:bg-line"
+              className={`mb-0.5 shrink-0 rounded px-3 py-1.5 text-sm transition-colors ${
+                showMakers ? "bg-accent-soft text-accent" : "bg-sunken text-ink hover:bg-line"
               }`}
               title="Quick generation requests"
             >
@@ -129,10 +129,10 @@ export default function CommandBar(p: Props) {
             <button
               type="submit"
               disabled={!value.trim() || p.busy || p.disabled}
-              className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-accent text-white transition-opacity disabled:opacity-30"
+              className="grid h-10 w-10 shrink-0 place-items-center rounded bg-accent text-on-accent transition-opacity disabled:opacity-30"
               title="Send (Enter)"
             >
-              {p.busy ? <span className="h-3 w-3 animate-ping rounded-full bg-white" /> : <ArrowUpIcon width={18} height={18} />}
+              {p.busy ? <span aria-hidden className="h-3 w-3 animate-ping rounded-full bg-on-accent" /> : <ArrowUpIcon width={18} height={18} />}
             </button>
           </form>
         </div>

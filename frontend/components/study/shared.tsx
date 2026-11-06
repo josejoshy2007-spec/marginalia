@@ -174,8 +174,8 @@ export function Working({ label, notice }: { label?: string | null; notice?: str
   return (
     <div className="mt-4 flex items-center gap-3 rounded-xl border border-line bg-card px-4 py-3 text-sm">
       <span className="relative flex h-2.5 w-2.5">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
-        <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-accent" />
+        <span aria-hidden className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
+        <span aria-hidden className="relative inline-flex h-2.5 w-2.5 rounded-full bg-accent" />
       </span>
       <span>
         {label ? `${label} Starting…` : notice}{" "}
@@ -246,7 +246,7 @@ export function RetryLink({ onRetry, label = "Try again" }: { onRetry: () => voi
       tabIndex={0}
       onClick={go}
       onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && go(e)}
-      className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-current px-2 py-0.5 font-medium hover:bg-danger hover:text-white"
+      className="inline-flex cursor-pointer items-center gap-1 rounded border border-current px-2 py-0.5 font-medium hover:bg-danger hover:text-on-accent"
     >
       <span className={spinning ? "inline-block animate-spin" : "inline-block"}>↻</span> {label}
     </span>
@@ -265,7 +265,7 @@ export function Segmented<T extends string>({
   label: string;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="inline-flex rounded-full bg-sunken p-0.5">
+    <div role="radiogroup" aria-label={label} className="inline-flex rounded bg-sunken p-0.5">
       {options.map((o) => (
         <button
           key={o.value}
@@ -273,8 +273,8 @@ export function Segmented<T extends string>({
           role="radio"
           aria-checked={value === o.value}
           onClick={() => onChange(o.value)}
-          className={`rounded-full px-3 py-1 text-sm transition-colors ${
-            value === o.value ? "bg-card text-ink shadow-sm" : "text-muted hover:text-ink"
+          className={`rounded px-3 py-1 text-sm transition-colors ${
+            value === o.value ? "bg-card text-ink ring-1 ring-line" : "text-muted hover:text-ink"
           }`}
         >
           {o.label}
@@ -288,7 +288,7 @@ export function ModeHeader({ eyebrow, title, children }: { eyebrow: string; titl
   return (
     <header className="flex flex-wrap items-end justify-between gap-4 border-b border-line pb-6">
       <div>
-        <p className="text-xs uppercase tracking-[0.18em] text-muted">{eyebrow}</p>
+        <p className="text-[11px] uppercase tracking-[0.12em] text-muted">{eyebrow}</p>
         <h1 className="mt-1 font-display text-4xl leading-tight">{title}</h1>
       </div>
       {children}
@@ -299,7 +299,7 @@ export function ModeHeader({ eyebrow, title, children }: { eyebrow: string; titl
 export function IBBadge({ label }: { label?: string | null }) {
   if (!label) return null;
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-moss/40 bg-moss/10 px-2.5 py-0.5 text-xs font-medium text-moss">
+    <span className="inline-flex items-center gap-1.5 rounded border border-moss/40 bg-moss/10 px-2.5 py-0.5 text-xs font-medium text-moss">
       <span className="h-1.5 w-1.5 rounded-full bg-moss" />
       Written for {label}
     </span>

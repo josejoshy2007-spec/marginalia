@@ -37,8 +37,8 @@ const DARK = {
 };
 const LIGHT = {
   "--paper": "#f4f5f8", "--rail": "#eceef3", "--card": "#ffffff", "--sunken": "#e8eaf0", "--line": "#d9dce5",
-  "--ink": "#12141c", "--ink-soft": "#2a2e3b", "--muted": "#626a80", "--accent": "#9a6200", "--accent-soft": "#fbecd0",
-  "--on-accent": "#ffffff", "--moss": "#1f8a57", "--danger": "#c52a2a", "--danger-soft": "#fbe1e1",
+  "--ink": "#12141c", "--ink-soft": "#2a2e3b", "--muted": "#626a80", "--accent": "#9a6200", "--accent-soft": "#fdf3e1",
+  "--on-accent": "#ffffff", "--moss": "#1a7a4c", "--danger": "#c52a2a", "--danger-soft": "#fbe1e1",
   "--hl-anchor": "#fde9b8", "--hl-anchor-active": "#fbd77a", "--hl-focus": "#f9c95c",
 };
 
@@ -97,6 +97,12 @@ if (process.argv.includes("--components")) {
   check("no pills: rounded-full only on small dots and progress bars", () =>
     assert.deepEqual(offenders(/\brounded-full\b/, /\b(h-1|h-1\.5|h-2|w-1\.5|w-2)\b|progress|aria-hidden/), []));
   check("eyebrow labels use 11px / 0.12em tracking", () => assert.deepEqual(offenders(/tracking-\[0\.1[68]em\]/), []));
+  check("no bubbly arbitrary radii (rounded-[…])", () => assert.deepEqual(offenders(/\brounded-\[/), []));
+  check("text on coloured fills uses on-accent (white fails on amber/green in dark)", () =>
+    assert.deepEqual(offenders(/\b(text-white|bg-white)\b/), []));
+  check("cards are flat: no small drop shadows (dialogs may keep shadow-xl)", () =>
+    assert.deepEqual(offenders(/\bshadow-(sm|md)\b/), []));
+  check("overlays darken with black, not ink (ink is light in dark mode)", () => assert.deepEqual(offenders(/\bbg-ink\/\d+/), []));
 }
 
 console.log(`\nALL ${passed} STYLE CHECKS PASSED`);

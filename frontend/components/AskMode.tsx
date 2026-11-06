@@ -94,7 +94,7 @@ export default function AskMode({
       <aside className={`${showList ? "flex" : "hidden"} min-w-0 flex-1 flex-col lg:flex lg:w-72 lg:flex-none`}>
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
-            <p className="text-xs uppercase tracking-[0.18em] text-muted">Ask AI</p>
+            <p className="text-[11px] uppercase tracking-[0.12em] text-muted">Ask AI</p>
             <h1 className="truncate font-display text-2xl leading-tight">Conversations</h1>
           </div>
           <button type="button" className="btn-ghost shrink-0" onClick={startNew}>
@@ -109,7 +109,7 @@ export default function AskMode({
                 type="button"
                 onClick={() => open(t.id)}
                 className={`w-full rounded-xl px-3 py-2.5 text-left transition-colors ${
-                  t.id === active.id ? "bg-card shadow-sm ring-1 ring-line" : "hover:bg-card/60"
+                  t.id === active.id ? "bg-card ring-1 ring-line" : "hover:bg-card/60"
                 }`}
               >
                 <span className="line-clamp-2 text-sm font-medium">{t.kind === "sheet" ? "Quick questions" : threadTitle(t)}</span>
@@ -271,7 +271,7 @@ function Composer({
           `From ${checkedCount} of ${totalCount} source${totalCount === 1 ? "" : "s"}`
         )}
       </p>
-      <div className="flex items-end gap-2 rounded-[22px] border border-line bg-card p-2 shadow-[0_8px_30px_-18px_rgba(40,30,20,.5)]">
+      <div className="flex items-end gap-2 rounded border border-line bg-card p-2">
         <textarea
           ref={ref}
           rows={1}
@@ -295,7 +295,7 @@ function Composer({
           onClick={submit}
           disabled={!text.trim() || busy || noSources}
           aria-label="Send"
-          className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-accent text-paper transition-opacity disabled:opacity-40"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded bg-accent text-on-accent transition-opacity disabled:opacity-40"
         >
           <ArrowUpIcon width={18} height={18} />
         </button>

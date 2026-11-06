@@ -136,7 +136,7 @@ function EpisodeCard({
   if (!isReady(ep))
     return (
       <li className="group flex gap-3 rounded-2xl border border-dashed border-line bg-card p-4">
-        <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-sunken text-muted">
+        <span className="grid h-11 w-11 shrink-0 place-items-center rounded bg-sunken text-muted">
           <WaveIcon />
         </span>
         <div className="min-w-0 flex-1">
@@ -150,7 +150,7 @@ function EpisodeCard({
     );
   return (
     <li className="group flex gap-3 rounded-2xl border border-line bg-card p-4">
-      <button type="button" onClick={onOpen} className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-ink text-paper" title="Play">
+      <button type="button" onClick={onOpen} className="grid h-11 w-11 shrink-0 place-items-center rounded bg-accent text-on-accent" title="Play">
         <WaveIcon />
       </button>
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
@@ -216,7 +216,7 @@ function Episode(p: StudyProps & { id: number; onExit: () => void }) {
       {ep?.content.summary && <p className="mt-2 text-ink-soft">{ep.content.summary}</p>}
 
       {ep && (
-        <div className="sticky top-3 z-10 mt-6 rounded-2xl border border-line bg-card/95 p-4 shadow-sm backdrop-blur">
+        <div className="sticky top-3 z-10 mt-6 rounded-2xl border border-line bg-card/95 p-4 backdrop-blur">
           <div className="mb-3 flex flex-wrap items-center gap-3">
             <Segmented<Engine>
               label="Voice"
@@ -393,7 +393,7 @@ function DevicePlayer({
       <button
         type="button"
         onClick={() => (playing ? pause() : speakFrom(Math.max(0, active)))}
-        className="grid h-11 w-11 place-items-center rounded-full bg-accent text-lg text-white"
+        className="grid h-11 w-11 place-items-center rounded bg-accent text-lg text-on-accent"
         title={playing ? "Pause" : "Play"}
       >
         {playing ? "❚❚" : "▶"}

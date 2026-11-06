@@ -37,8 +37,8 @@ export default function ResponseSheet({
 
   return (
     <div className="absolute inset-x-0 bottom-0 z-30 flex justify-center px-3">
-      <div className="sheet-rise mb-[118px] flex max-h-[62vh] w-full max-w-[720px] flex-col rounded-[22px] border border-line bg-card shadow-[0_20px_60px_-20px_rgba(40,30,20,.45)]">
-        <div className="flex items-center justify-between border-b border-line px-5 py-2.5 text-xs uppercase tracking-[0.16em] text-muted">
+      <div className="sheet-rise mb-[118px] flex max-h-[62vh] w-full max-w-[720px] flex-col rounded border border-line bg-card shadow-[0_12px_40px_-12px_rgba(0,0,0,.6)]">
+        <div className="flex items-center justify-between border-b border-line px-5 py-2.5 text-[11px] uppercase tracking-[0.12em] text-muted">
           <span>From your sources</span>
           <span className="flex items-center gap-3">
             <button type="button" onClick={onClear} className="normal-case tracking-normal hover:text-ink">

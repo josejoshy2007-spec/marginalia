@@ -35,8 +35,8 @@ export default function MarginThread({ thread, active, onActivate, onAsk, onDisc
   return (
     <div
       onMouseDown={onActivate}
-      className={`margin-card rounded-xl border bg-card text-sm shadow-sm transition-shadow ${
-        active ? "border-accent/50 shadow-md" : "border-line"
+      className={`margin-card rounded-xl border bg-card text-sm transition-colors ${
+        active ? "border-accent" : "border-line"
       }`}
     >
       <div className="flex items-start gap-2 border-b border-line/70 px-3 py-2">
@@ -114,7 +114,7 @@ export default function MarginThread({ thread, active, onActivate, onAsk, onDisc
         <button
           type="submit"
           disabled={!draft.trim() || thread.busy}
-          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-ink text-paper disabled:opacity-30"
+          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent text-on-accent disabled:opacity-30"
           title="Ask"
         >
           <ArrowUpIcon width={15} height={15} />

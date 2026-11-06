@@ -104,7 +104,7 @@ export default function SettingsSheet({
   if (!s) return null;
   return (
     <div
-      className="fixed inset-0 z-[90] overflow-y-auto bg-ink/30 backdrop-blur-[2px]"
+      className="fixed inset-0 z-[90] overflow-y-auto bg-black/60 backdrop-blur-[2px]"
     >
       {/* min-h-full + items-center: centred when it fits, scrolls from the top on short phone screens. */}
       <div

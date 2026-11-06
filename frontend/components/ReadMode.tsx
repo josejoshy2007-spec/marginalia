@@ -137,7 +137,7 @@ export default function ReadMode(p: Props) {
           aria-label="Source"
           value={source.id}
           onChange={(e) => p.onPickSource(Number(e.target.value))}
-          className="mb-2 max-w-full cursor-pointer appearance-none bg-transparent text-xs uppercase tracking-[0.18em] text-muted outline-none hover:text-ink"
+          className="mb-2 max-w-full cursor-pointer appearance-none bg-transparent text-[11px] uppercase tracking-[0.12em] text-muted outline-none hover:text-ink"
         >
           {p.sources.map((s) => (
             <option key={s.id} value={s.id}>

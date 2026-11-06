@@ -272,9 +272,9 @@ function ReviewSession(p: StudyProps & { deckId: number; onExit: () => void }) {
           <button
             type="button"
             onClick={() => setRevealed(true)}
-            className="mt-8 min-h-[280px] rounded-3xl border border-line bg-card p-8 text-left shadow-sm transition-shadow hover:shadow-md"
+            className="mt-8 min-h-[280px] rounded-3xl border border-line bg-card p-8 text-left transition-colors hover:border-muted"
           >
-            <p className="text-xs uppercase tracking-[0.16em] text-muted">{card.is_new ? "New" : "Review"}</p>
+            <p className="text-[11px] uppercase tracking-[0.12em] text-muted">{card.is_new ? "New" : "Review"}</p>
             <p className="mt-3 font-display text-2xl leading-snug">{card.front}</p>
             {revealed ? (
               <div className="mt-6 border-t border-dashed border-line pt-5 font-reading text-[1.05rem] leading-relaxed">
@@ -399,7 +399,7 @@ function Quizzes(p: StudyProps & { onOpen: (id: number) => void }) {
                     on ? "border-ink bg-sunken" : "border-line hover:border-muted"
                   }`}
                 >
-                  <span className={`mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded border text-[10px] ${on ? "border-moss bg-moss text-white" : "border-muted"}`}>
+                  <span className={`mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded border text-[10px] ${on ? "border-moss bg-moss text-on-accent" : "border-muted"}`}>
                     {on ? "✓" : ""}
                   </span>
                   <span>
@@ -580,7 +580,7 @@ function QuizRunner(p: StudyProps & { quizId: number; onExit: () => void }) {
                                 : "border-line bg-card hover:border-muted"
                         }`}
                       >
-                        <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full border border-current text-[11px]">
+                        <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded border border-current text-[11px]">
                           {String.fromCharCode(65 + oi)}
                         </span>
                         <span>{opt}</span>
@@ -631,7 +631,7 @@ function QuizRunner(p: StudyProps & { quizId: number; onExit: () => void }) {
                             const got = r?.points?.[j] ?? 0;
                             return (
                               <li key={j} className="flex items-start gap-2">
-                                <span className={`mt-0.5 grid h-5 min-w-5 shrink-0 place-items-center rounded px-1 text-[11px] font-semibold ${got > 0 ? "bg-moss text-white" : "bg-sunken text-muted"}`}>
+                                <span className={`mt-0.5 grid h-5 min-w-5 shrink-0 place-items-center rounded px-1 text-[11px] font-semibold ${got > 0 ? "bg-moss text-on-accent" : "bg-sunken text-muted"}`}>
                                   {got > 0 ? `✓${got}` : `[${pt.marks}]`}
                                 </span>
                                 <span>{pt.text}</span>
