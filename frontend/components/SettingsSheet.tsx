@@ -7,6 +7,8 @@ import { localApi } from "@/lib/local/store";
 import { saveFile, scheduleReminder, isNative } from "@/lib/native";
 import { CloseIcon } from "./icons";
 import DriveSync from "./DriveSync";
+import { Segmented } from "./study/shared";
+import { applyTheme } from "@/lib/theme";
 
 const mb = (n: number) => (n > 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`);
 
@@ -167,6 +169,24 @@ export default function SettingsSheet({
         {!firstRun && (
           <>
             <DriveSync />
+
+            <section className="mt-6 border-t border-line pt-4">
+              <h3 className="text-sm font-semibold">Appearance</h3>
+              <div className="mt-2">
+                <Segmented
+                  label="Appearance"
+                  value={s.theme}
+                  options={[
+                    { value: "dark", label: "Dark" },
+                    { value: "light", label: "Light" },
+                  ]}
+                  onChange={(theme) => {
+                    applyTheme(theme);
+                    update({ theme });
+                  }}
+                />
+              </div>
+            </section>
 
             <section className="mt-6 border-t border-line pt-4">
               <h3 className="text-sm font-semibold">Review reminder</h3>

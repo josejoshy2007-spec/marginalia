@@ -1,10 +1,11 @@
 import type { Metadata, Viewport } from "next";
 import PwaRegister from "@/components/PwaRegister";
-import { Fraunces, Literata, Public_Sans } from "next/font/google";
+import { Inter, Literata } from "next/font/google";
+import { THEME_BOOTSTRAP } from "@/lib/theme";
 import "./globals.css";
 
-const ui = Public_Sans({ variable: "--font-ui", subsets: ["latin"] });
-const display = Fraunces({ variable: "--font-display-face", subsets: ["latin"], style: ["normal", "italic"] });
+// Inter for everything; Literata only for long reading (font-reading).
+const ui = Inter({ variable: "--font-ui", subsets: ["latin"] });
 const reading = Literata({ variable: "--font-reading-face", subsets: ["latin"], style: ["normal", "italic"] });
 
 const BASE = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
@@ -19,10 +20,7 @@ export const metadata: Metadata = {
 
 
 export const viewport: Viewport = {
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f5f0e6" },
-    { media: "(prefers-color-scheme: dark)", color: "#1b1a17" },
-  ],
+  themeColor: "#0e1016",
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
@@ -30,7 +28,11 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${ui.variable} ${display.variable} ${reading.variable} h-full antialiased`}>
+    // suppressHydrationWarning: THEME_BOOTSTRAP may add data-theme before React hydrates.
+    <html lang="en" className={`${ui.variable} ${reading.variable} h-full antialiased`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP }} />
+      </head>
       <body className="h-full">
         {children}
         <PwaRegister />

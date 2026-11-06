@@ -13,6 +13,7 @@ export type Settings = {
   retrievalK: number;
   remindersOn: boolean;
   reminderHour: number; // local hour for the daily "cards due" reminder
+  theme: "dark" | "light"; // Settings → Appearance (lib/theme.ts)
   syncOn: boolean; // Google Drive sync connected
   syncEmail: string;
   lastSyncAt: string;
@@ -30,6 +31,7 @@ export const DEFAULTS: Settings = {
   retrievalK: 12,
   remindersOn: true,
   reminderHour: 17,
+  theme: "dark",
   syncOn: false,
   syncEmail: "",
   lastSyncAt: "",

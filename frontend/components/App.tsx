@@ -5,6 +5,7 @@ import { api, ENGINE, streamChat, type Citation, type Source, type Subject } fro
 import { getSettings } from "@/lib/local/settings";
 import { localApi } from "@/lib/local/store";
 import { scheduleReminder } from "@/lib/native";
+import { applyTheme } from "@/lib/theme";
 import SettingsSheet from "./SettingsSheet";
 import { useSyncStatus } from "./DriveSync";
 import { startAutoSync } from "@/lib/local/sync";
@@ -46,6 +47,7 @@ export default function App() {
     if (ENGINE !== "local") return;
     getSettings().then(async (s) => {
       if (!s.geminiKey) setSettings("first");
+      applyTheme(s.theme); // keeps the pre-paint copy in localStorage in step with the saved setting
       scheduleReminder(s.remindersOn, s.reminderHour, await localApi.dueCards());
     });
     startAutoSync();

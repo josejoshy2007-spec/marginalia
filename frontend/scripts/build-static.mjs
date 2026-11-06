@@ -32,8 +32,8 @@ const manifest = {
   scope: `${base}/`,
   display: "standalone",
   orientation: "any",
-  background_color: "#f5f0e6",
-  theme_color: "#1e2427",
+  background_color: "#0e1016",
+  theme_color: "#0e1016",
   categories: ["education", "productivity"],
   icons: [
     ...[48, 72, 96, 128, 144, 152, 192, 256, 384, 512].map((s) => ({ src: `${base}/icons/icon-${s}.png`, sizes: `${s}x${s}`, type: "image/png", purpose: "any" })),

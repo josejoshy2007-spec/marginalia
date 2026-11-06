@@ -9,7 +9,9 @@
     "build:static": "node scripts/build-static.mjs",
     "start": "next start",
     "test:sync": "tsx scripts/sync-test.mts",
-    "test:formats": "tsx scripts/formats-test.mts"
+    "test:formats": "tsx scripts/formats-test.mts",
+    "test:theme": "tsx scripts/theme-test.mts",
+    "test:style": "tsx scripts/style-test.mts"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
