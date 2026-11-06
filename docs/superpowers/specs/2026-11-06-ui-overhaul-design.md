@@ -15,7 +15,7 @@ Success = the app feels dark, sleek and sharp on phone and PC, with nothing brok
 | Overall feel | Dark & sleek, "Nebula" direction (cool navy-black, crisp modern sans) |
 | Light mode | Dark by default; a Dark/Light switch in Settings |
 | Accent | **Amber** (not violet: violet reads as "AI") |
-| Corners | **2px** everywhere; no pills, no bubbly shapes |
+| Corners | **4px** everywhere (tried 2px; felt too sharp); no pills, no bubbly shapes |
 | Phone navigation | Keep the left side rail |
 | Fonts | Sans everywhere; a serif only for long reading |
 
@@ -76,15 +76,15 @@ errors; no gradients, glows or coloured shadows. Hard-coded `rgba(40,30,20,…)`
 
 ### Shape and depth
 
-- Corners: 2px on every button, card, input, dialog, chip and segmented control. Tailwind's radius scale
-  (`--radius-sm … --radius-3xl`) is set to 2px in `@theme`; the 32 `rounded-full` uses are reviewed one by one:
+- Corners: 4px on every button, card, input, dialog, chip and segmented control. Tailwind's radius scale
+  (`--radius-sm … --radius-3xl`) is set to 4px in `@theme`; the 32 `rounded-full` uses are reviewed one by one:
   real circles that aren't controls (status dots, the progress-bar ends) may stay round; every button,
-  pill, chip, input and send button becomes 2px.
+  pill, chip, input and send button becomes 4px.
 - Flat: no drop shadows on cards; separation by 1px `--line` borders and `--card` vs `--paper` contrast.
   Dialogs/sheets keep one subtle dark shadow so they read as floating.
-- Shared primitives in `globals.css` are rewritten: `.btn-primary` (amber fill, `--on-accent` text, 2px),
+- Shared primitives in `globals.css` are rewritten: `.btn-primary` (amber fill, `--on-accent` text, 4px),
   `.btn-ghost` (1px border, muted text, hover ink), `.field` (card bg, 1px line, amber focus border),
-  `.cite-marker` (2px, accent-soft bg, amber text; hover amber fill).
+  `.cite-marker` (4px, accent-soft bg, amber text; hover amber fill).
 - Focus: visible 2px amber outline on keyboard focus for buttons, inputs and rail items.
 - Motion: keep short fades/rises (≤200ms, ease-out); no bounce.
 
