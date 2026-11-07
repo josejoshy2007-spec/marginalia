@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { checkKey } from "@/lib/local/gemini";
+import { checkCerebrasKey } from "@/lib/local/cerebras";
 import { DEFAULTS, getSettings, saveSettings, type Settings } from "@/lib/local/settings";
 import { localApi } from "@/lib/local/store";
 import { saveFile, scheduleReminder, isNative } from "@/lib/native";
@@ -34,11 +35,15 @@ export default function SettingsSheet({
   const [busy, setBusy] = useState<"export" | "import" | null>(null);
   const [usage, setUsage] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const [cKey, setCKey] = useState("");
+  const [cMsg, setCMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [cChecking, setCChecking] = useState(false);
 
   useEffect(() => {
     getSettings().then((v) => {
       setS(v);
       setKey(v.geminiKey);
+      setCKey(v.cerebrasKey);
     });
     navigator.storage
       ?.estimate?.()
@@ -68,6 +73,22 @@ export default function SettingsSheet({
     await update({ geminiKey: key.trim() });
     setKeyMsg({ ok: true, text: "Key works and is saved on this device." });
     if (firstRun) setTimeout(onClose, 700);
+  };
+
+  const saveCerebras = async () => {
+    setCChecking(true);
+    setCMsg(null);
+    const r = await checkCerebrasKey(cKey);
+    setCChecking(false);
+    if ("error" in r) return setCMsg({ ok: false, text: r.error });
+    await update({ cerebrasKey: cKey.trim(), cerebrasModel: r.model });
+    setCMsg({ ok: true, text: `Key works. Using ${r.model}.` });
+  };
+
+  const removeCerebras = async () => {
+    await update({ cerebrasKey: "", cerebrasModel: "" });
+    setCKey("");
+    setCMsg({ ok: true, text: "Removed." });
   };
 
   const doExport = async () => {
@@ -168,6 +189,47 @@ export default function SettingsSheet({
 
         {!firstRun && (
           <>
+            <section className="mt-6 border-t border-line pt-4">
+              <h3 className="text-sm font-semibold">Extra free AI (optional)</h3>
+              <p className="mt-1 text-xs text-muted">
+                When Gemini&apos;s free quota runs out, chat, quizzes, exam questions, summaries and study sheets carry on
+                with Cerebras (free, about 14,000 requests a day, no card). Marking, photos and recordings stay on Gemini.
+                Get a key at{" "}
+                <a className="text-accent underline" href="https://cloud.cerebras.ai" target="_blank" rel="noreferrer">
+                  cloud.cerebras.ai
+                </a>{" "}
+                → API Keys.
+              </p>
+              <div className="mt-2 flex gap-2">
+                <input
+                  className="field min-w-0 flex-1 font-mono text-sm"
+                  type={show ? "text" : "password"}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="csk-…"
+                  aria-label="Cerebras API key"
+                  value={cKey}
+                  onChange={(e) => setCKey(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && cKey.trim() && saveCerebras()}
+                />
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <button type="button" className="btn-ghost" disabled={!cKey.trim() || cChecking} onClick={saveCerebras}>
+                  {cChecking ? "Checking…" : "Save key"}
+                </button>
+                {s.cerebrasKey && (
+                  <button type="button" className="text-xs text-muted underline" onClick={removeCerebras}>
+                    Remove
+                  </button>
+                )}
+                {cMsg ? (
+                  <span className={`text-xs ${cMsg.ok ? "text-moss" : "text-danger"}`}>{cMsg.text}</span>
+                ) : (
+                  s.cerebrasKey && <span className="text-xs text-muted">On, using {s.cerebrasModel}.</span>
+                )}
+              </div>
+            </section>
+
             <DriveSync />
 
             <section className="mt-6 border-t border-line pt-4">
@@ -241,13 +303,15 @@ export default function SettingsSheet({
             <details className="mt-6 border-t border-line pt-4 text-sm">
               <summary className="cursor-pointer font-semibold">Advanced</summary>
               <p className="mt-2 text-xs text-muted">
-                Change a model name only if Google retires one. Requests per minute keeps you under the free tier.
+                Change a model name only if Google retires one. Extra models (comma-separated) are tried last, after
+                Cerebras; each has its own free daily quota. Requests per minute keeps you under the free tier.
               </p>
               <div className="mt-2 grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2 text-xs">
                 {(
                   [
                     ["model", "Main model"],
                     ["fallbackModel", "Backup model"],
+                    ["extraModels", "Extra models"],
                     ["ttsModel", "Speech model"],
                     ["embedModel", "Search model"],
                   ] as const

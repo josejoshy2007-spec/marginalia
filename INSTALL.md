@@ -142,9 +142,19 @@ File → Download). Photos are read by Gemini, so they use a little quota.
 
 ## Things to know
 
-- **Free Gemini quota is small.** The main model allows roughly 20 requests a day on the free tier;
-  after that the app switches to the backup model. If both are used up, it says so; the quota resets
-  at midnight Pacific time (3–4 pm in China). Recall cards, reading and reviewing don't use quota.
+- **Free Gemini quota is small.** The main model allows roughly 20 requests a day on the free tier.
+  When it runs out, the app moves on by itself: backup model, then **Cerebras** (if you added a key),
+  then older and "lite" Gemini models, which each have their own daily quota. Only when all of those are
+  used up does it say so; Gemini's quota resets at midnight Pacific time (3–4 pm in China). Recall cards,
+  reading and reviewing don't use quota.
+
+## More free AI with Cerebras (optional, recommended)
+
+Cerebras gives about 14,000 free requests a day, with no card. Get a key at **cloud.cerebras.ai**
+(sign in → **API Keys** → create one), then paste it in **Settings → Extra free AI → Save key**. From then
+on, when Gemini runs out, chat, Ask AI, quizzes, exam questions, summaries and study sheets carry on with
+Cerebras. Exam and quiz **marking**, photos, recordings and search stay on Gemini (they need it, or need
+its stronger marking). Add the key on each device; it isn't synced.
 - **Lecture recordings** are transcribed by Gemini instead of Whisper: uploaded once, then
   transcribed in 20-minute parts, up to 3 hours. A 2-hour lecture takes about 6 requests.
 - **Big textbooks** are read on the phone, one page at a time. A 900-page book takes a few minutes to
