@@ -357,7 +357,7 @@ function Markscheme({ q, result }: { q: ExamQuestion; result: MarkResult | null 
   const ms = q.markscheme;
   return (
     <div className="mt-3 rounded-2xl border border-dashed border-line px-4 py-3 text-sm">
-      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">Markscheme</p>
+      <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">Markscheme</p>
       {ms.type === "markbands" ? (
         <>
           <table className="mt-2 w-full text-left">

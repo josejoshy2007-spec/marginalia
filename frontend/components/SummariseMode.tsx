@@ -212,7 +212,7 @@ function SourceChip({ s, on, toggle }: { s: Source; on: boolean; toggle: () => v
       className={`flex max-w-full items-center gap-2 rounded border px-3 py-1 text-sm transition-colors ${on ? "border-accent bg-accent-soft text-accent" : "border-line text-ink-soft hover:border-muted"}`}
     >
       <span className="truncate">{s.title}</span>
-      <span className={`shrink-0 text-[10px] uppercase tracking-wider ${on ? "text-accent/70" : "text-muted"}`}>
+      <span className={`shrink-0 text-[10px] uppercase tracking-wider ${on ? "text-accent" : "text-muted"}`}>
         {kind}{s.page_count ? ` · ${s.page_count}p` : ""}
       </span>
     </button>

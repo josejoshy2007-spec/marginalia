@@ -72,7 +72,7 @@ export default function CommandBar(p: Props) {
             ))}
           </div>
         )}
-        <div className="command-bar rounded border border-line bg-card/95 p-2 shadow-[0_12px_40px_-12px_rgba(0,0,0,.6)] backdrop-blur">
+        <div className="command-bar rounded border border-line bg-card/95 p-2 shadow-[var(--shadow-float)] backdrop-blur">
           <div className="flex items-center gap-2 px-2 pb-1 text-[11px] text-muted">
             <span className="inline-flex items-center gap-1">
               <span className={`h-1.5 w-1.5 rounded-full ${p.checkedCount ? "bg-moss" : "bg-danger"}`} />

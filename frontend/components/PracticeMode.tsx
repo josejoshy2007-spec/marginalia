@@ -384,7 +384,7 @@ function Quizzes(p: StudyProps & { onOpen: (id: number) => void }) {
           Short and written answers are marked for you.
         </p>
         <div className="mt-4">
-          <p className="mb-2 text-xs uppercase tracking-[0.14em] text-muted">Question types (pick one or more)</p>
+          <p className="mb-2 text-[11px] uppercase tracking-[0.12em] text-muted">Question types (pick one or more)</p>
           <div className="grid gap-2 sm:grid-cols-3">
             {QTYPES.map((t) => {
               const on = types.includes(t.value);

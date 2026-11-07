@@ -71,6 +71,23 @@ check("shared primitives: amber primary, 4px corners, no pills", () => {
   assert.ok(!/border-radius:\s*999px/.test(css), "no 999px pills in globals.css");
 });
 
+check("the focus ring is a base style, so utilities like outline-none (text boxes) still win", () => {
+  const base = css.indexOf("@layer base");
+  assert.ok(base >= 0, "no @layer base block");
+  const fv = css.indexOf("button:focus-visible");
+  assert.ok(fv > base, "the button/input :focus-visible ring must sit inside @layer base");
+});
+
+check("form controls (checkboxes, radios) use the amber accent, not browser blue", () => {
+  assert.equal(block(":root")["accent-color"], "var(--accent)");
+});
+
+check("the floating-sheet shadow is themed: strong on dark, light on light", () => {
+  assert.ok(block(":root")["--shadow-float"], "dark --shadow-float missing");
+  assert.ok(block(':root[data-theme="light"]')["--shadow-float"], "light --shadow-float missing");
+  assert.notEqual(block(":root")["--shadow-float"], block(':root[data-theme="light"]')["--shadow-float"]);
+});
+
 check("headings are weighted and keyboard focus is visible", () => {
   const d = block(".font-display");
   assert.equal(d["font-weight"], "600");
@@ -96,7 +113,11 @@ if (process.argv.includes("--components")) {
   check("text on fills uses on-accent, not paper", () => assert.deepEqual(offenders(/\btext-paper\b/), []));
   check("no pills: rounded-full only on small dots and progress bars", () =>
     assert.deepEqual(offenders(/\brounded-full\b/, /\b(h-1|h-1\.5|h-2|w-1\.5|w-2)\b|progress|aria-hidden/), []));
-  check("eyebrow labels use 11px / 0.12em tracking", () => assert.deepEqual(offenders(/tracking-\[0\.1[68]em\]/), []));
+  check("eyebrow labels use 11px / 0.12em tracking", () => assert.deepEqual(offenders(/tracking-\[0\.1[3-9]em\]/), []));
+  check("small text on tinted chips is full strength (no faded accent text)", () =>
+    assert.deepEqual(offenders(/\btext-accent\/\d+/), []));
+  check("floating sheets use the themed shadow token, not a fixed black shadow", () =>
+    assert.deepEqual(offenders(/shadow-\[[^\]]*rgba\(0,0,0/), []));
   check("no bubbly arbitrary radii (rounded-[…])", () => assert.deepEqual(offenders(/\brounded-\[/), []));
   check("text on coloured fills uses on-accent (white fails on amber/green in dark)", () =>
     assert.deepEqual(offenders(/\b(text-white|bg-white)\b/), []));
