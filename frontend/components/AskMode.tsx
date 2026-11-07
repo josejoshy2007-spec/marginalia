@@ -202,15 +202,23 @@ function Messages({ thread, onCite, onRetry }: { thread: Thread; onCite: (c: Cit
     );
 
   return (
-    <div className="flex-1 py-5">
+    <div className="mx-auto w-full max-w-[46rem] flex-1 py-6">
       {thread.turns.map((turn, i) =>
         turn.role === "user" ? (
-          <p key={i} className={`font-display text-xl leading-snug ${i ? "mt-7 border-t border-line pt-6" : ""}`}>
-            {turn.text}
-          </p>
+          <div key={i} className={`flex justify-end ${i ? "mt-10" : ""}`}>
+            <p className="max-w-[85%] whitespace-pre-wrap break-words rounded border border-line bg-sunken px-4 py-2.5 text-[0.95rem] leading-relaxed">
+              {turn.text}
+            </p>
+          </div>
         ) : (
-          <div key={i} className="mt-2 leading-relaxed">
-            <AnswerBody body={turn.body} citations={turn.citations} onCite={onCite} streaming={thread.busy && i === thread.turns.length - 1} />
+          <div key={i} className="mt-6">
+            <AnswerBody
+              body={turn.body}
+              citations={turn.citations}
+              onCite={onCite}
+              streaming={thread.busy && i === thread.turns.length - 1}
+              variant="chat"
+            />
             {turn.error && (
               <p className="mt-2 flex flex-wrap items-center gap-2 text-sm text-danger">
                 {turn.error}
@@ -255,7 +263,7 @@ function Composer({
     setText("");
   };
   return (
-    <div className="sticky bottom-0 -mx-1 bg-paper px-1 pb-4 pt-2">
+    <div className="sticky bottom-0 mx-auto w-full max-w-[46rem] bg-paper px-1 pb-4 pt-2">
       <p className="mb-1.5 flex items-center gap-1.5 px-1 text-xs text-muted">
         <span className={`h-1.5 w-1.5 rounded-full ${mode === "general" ? "bg-muted" : noSources ? "bg-danger" : "bg-moss"}`} />
         {mode === "general" ? (

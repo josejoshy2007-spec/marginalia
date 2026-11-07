@@ -240,3 +240,32 @@ select option {
     outline-offset: 2px;
   }
 }
+
+/* AI answers: maths (KaTeX) */
+.answer .math-display {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.9em 0;
+}
+.answer .math-body {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.15em 0;
+}
+.answer .math-cites {
+  display: flex;
+  gap: 0.15rem;
+  flex-shrink: 0;
+}
+.answer .math-display .katex-display {
+  margin: 0;
+}
+.answer .katex {
+  font-size: 1.12em;
+}
+.answer-chat .katex-display > .katex {
+  font-size: 1.15em;
+}

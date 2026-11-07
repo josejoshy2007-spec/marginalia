@@ -12,7 +12,8 @@
     "test:formats": "tsx scripts/formats-test.mts",
     "test:theme": "tsx scripts/theme-test.mts",
     "test:style": "tsx scripts/style-test.mts",
-    "test:providers": "tsx scripts/providers-test.mts"
+    "test:providers": "tsx scripts/providers-test.mts",
+    "test:answers": "tsx scripts/answer-test.mts"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
@@ -26,6 +27,7 @@
     "@capgo/capacitor-social-login": "^8.7.5",
     "dexie": "^4.4.6",
     "fflate": "^0.8.3",
+    "katex": "^0.16.22",
     "next": "16.4.1",
     "pdfjs-dist": "^6.4.299",
     "react": "19.3.0",
@@ -34,6 +36,7 @@
   "devDependencies": {
     "@capacitor/cli": "^8.5.3",
     "@tailwindcss/turbopack": "^4",
+    "@types/katex": "^0.16.7",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

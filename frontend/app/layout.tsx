@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import PwaRegister from "@/components/PwaRegister";
 import { Inter, Literata } from "next/font/google";
 import { THEME_BOOTSTRAP } from "@/lib/theme";
+import "katex/dist/katex.min.css";
 import "./globals.css";
 
 // Inter for everything; Literata only for long reading (font-reading).
