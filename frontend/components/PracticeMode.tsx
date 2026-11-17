@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { tap } from "@/lib/native";
-import { api, type ArtifactDetail, type ArtifactSummary, type CardItem, type Grade, type QuizQuestion, type QuizResult } from "@/lib/api";
+import { api, type ArtifactDetail, type ArtifactSummary, type CardItem, type Grade } from "@/lib/api";
 import {
   CiteMarks,
   ErrorNote,
@@ -19,7 +19,8 @@ import {
 } from "./study/shared";
 import { TrashIcon } from "./icons";
 import { ExamRunner, Exams } from "./ExamPractice";
-import PhotoButton from "./PhotoButton";
+import QuizRunner, { DIFFICULTY_LABEL, QTYPES, similarRequest, typeLabel, type QType } from "./QuizRunner";
+import { MathText } from "./AnswerBody";
 import { askConfirm } from "@/lib/confirm";
 
 type Tab = "cards" | "quiz" | "exam";
@@ -31,7 +32,7 @@ export default function PracticeMode(p: StudyProps) {
 
   if (open?.kind === "review") return <ReviewSession {...p} deckId={open.id} onExit={() => setOpen(null)} />;
   if (open?.kind === "browse") return <BrowseDeck {...p} deckId={open.id} onExit={() => setOpen(null)} />;
-  if (open?.kind === "quiz") return <QuizRunner {...p} quizId={open.id} onExit={() => setOpen(null)} />;
+  if (open?.kind === "quiz") return <QuizRunner {...p} quizId={open.id} onExit={() => setOpen(null)} onOpen={(id) => setOpen({ kind: "quiz", id })} />;
   if (open?.kind === "exam") return <ExamRunner {...p} examId={open.id} onExit={() => setOpen(null)} />;
 
   return (
@@ -242,7 +243,7 @@ function ReviewSession(p: StudyProps & { deckId: number; onExit: () => void }) {
 
   const total = done + (queue?.length ?? 0);
   return (
-    <div className="mx-auto flex max-w-2xl flex-col px-6 pt-8">
+    <div className="mx-auto flex max-w-2xl flex-col px-4 pt-6 sm:px-6 sm:pt-8">
       <div className="flex items-center gap-4">
         <button type="button" onClick={p.onExit} className="btn-ghost">
           ← Decks
@@ -272,13 +273,13 @@ function ReviewSession(p: StudyProps & { deckId: number; onExit: () => void }) {
           <button
             type="button"
             onClick={() => setRevealed(true)}
-            className="mt-8 min-h-[280px] rounded-3xl border border-line bg-card p-8 text-left transition-colors hover:border-muted"
+            className="mt-6 min-h-[260px] rounded border border-line bg-card p-5 text-left transition-colors hover:border-muted sm:p-8"
           >
             <p className="text-[11px] uppercase tracking-[0.12em] text-muted">{card.is_new ? "New" : "Review"}</p>
-            <p className="mt-3 font-display text-2xl leading-snug">{card.front}</p>
+            <p className="mt-3 font-display text-2xl leading-snug"><MathText text={card.front} /></p>
             {revealed ? (
               <div className="mt-6 border-t border-dashed border-line pt-5 font-reading text-[1.05rem] leading-relaxed">
-                {card.back}{" "}
+                <MathText text={card.back} />{" "}
                 {deck && <CiteMarks cite={card.cite} passages={deck.passages} onCite={p.onCite} />}
               </div>
             ) : (
@@ -293,7 +294,7 @@ function ReviewSession(p: StudyProps & { deckId: number; onExit: () => void }) {
                   type="button"
                   disabled={saving}
                   onClick={() => grade(g)}
-                  className={`rounded-2xl border px-2 py-3 text-center transition-colors ${
+                  className={`min-h-14 rounded border px-2 py-3 text-center transition-colors ${
                     g === "again"
                       ? "border-danger/40 hover:bg-danger-soft"
                       : g === "good"
@@ -330,9 +331,9 @@ function BrowseDeck(p: StudyProps & { deckId: number; onExit: () => void }) {
         {deck?.cards?.map((c, i) => (
           <li key={c.id} className="grid gap-1 py-4 sm:grid-cols-[2rem_1fr_1fr] sm:gap-4">
             <span className="text-sm text-muted">{i + 1}</span>
-            <p className="font-medium">{c.front}</p>
+            <p className="font-medium"><MathText text={c.front} /></p>
             <p className="font-reading text-ink-soft">
-              {c.back} <CiteMarks cite={c.cite} passages={deck.passages} onCite={p.onCite} />
+              <MathText text={c.back} /> <CiteMarks cite={c.cite} passages={deck.passages} onCite={p.onCite} />
               <span className="mt-1 block font-sans text-xs text-muted">
                 {c.is_new ? "new" : `next ${timeUntil(c.due_at)}`}
                 {c.lapses ? ` · forgotten ${c.lapses}×` : ""}
@@ -346,15 +347,6 @@ function BrowseDeck(p: StudyProps & { deckId: number; onExit: () => void }) {
 }
 
 // ---------------------------------------------------------------- quizzes
-
-type QType = "mcq" | "short" | "long";
-const QTYPES: { value: QType; label: string; blurb: string }[] = [
-  { value: "mcq", label: "Multiple choice", blurb: "Pick A–D" },
-  { value: "short", label: "Short answer", blurb: "A word or phrase" },
-  { value: "long", label: "Written explanation", blurb: "A few sentences, marked" },
-];
-const typeLabel = (t: string) => QTYPES.find((x) => x.value === t)?.label ?? t;
-type Answer = number | string | null;
 
 function Quizzes(p: StudyProps & { onOpen: (id: number) => void }) {
   const { items, busy, notice, error, setError, generate, remove, retry, retryLast } = useArtifacts(p.subjectId, "quiz");
@@ -384,7 +376,7 @@ function Quizzes(p: StudyProps & { onOpen: (id: number) => void }) {
           Short and written answers are marked for you.
         </p>
         <div className="mt-4">
-          <p className="mb-2 text-[11px] uppercase tracking-[0.12em] text-muted">Question types (pick one or more)</p>
+          <p className="mb-2 text-sm font-medium">Question types <span className="font-normal text-muted">(pick one or more)</span></p>
           <div className="grid gap-2 sm:grid-cols-3">
             {QTYPES.map((t) => {
               const on = types.includes(t.value);
@@ -395,8 +387,8 @@ function Quizzes(p: StudyProps & { onOpen: (id: number) => void }) {
                   role="checkbox"
                   aria-checked={on}
                   onClick={() => toggle(t.value)}
-                  className={`flex items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors ${
-                    on ? "border-ink bg-sunken" : "border-line hover:border-muted"
+                  className={`flex min-h-11 items-start gap-2.5 rounded border px-3 py-2.5 text-left transition-colors ${
+                    on ? "border-accent bg-accent-soft" : "border-line hover:border-muted"
                   }`}
                 >
                   <span className={`mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded border text-[10px] ${on ? "border-moss bg-moss text-on-accent" : "border-muted"}`}>
@@ -411,34 +403,40 @@ function Quizzes(p: StudyProps & { onOpen: (id: number) => void }) {
             })}
           </div>
         </div>
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <input
-            value={focus}
-            onChange={(e) => setFocus(e.target.value)}
-            placeholder="Focus on… (optional)"
-            className="field min-w-[200px] flex-1"
-          />
-          <Segmented
-            label="Difficulty"
-            value={difficulty}
-            onChange={setDifficulty}
-            options={[
-              { value: "easy", label: "Recall" },
-              { value: "medium", label: "Understand" },
-              { value: "hard", label: "Apply" },
-            ]}
-          />
-          <Segmented
-            label="Questions"
-            value={count}
-            onChange={setCount}
-            options={[
-              { value: "5", label: "5" },
-              { value: "8", label: "8" },
-              { value: "12", label: "12" },
-            ]}
-          />
-          <button className="btn-primary" disabled={!!busy || !p.checkedIds.length}>
+        <input
+          value={focus}
+          onChange={(e) => setFocus(e.target.value)}
+          placeholder="Focus on… (optional)"
+          className="field mt-4 min-h-11 w-full"
+        />
+        <div className="mt-4 flex flex-wrap items-end gap-x-6 gap-y-3 [&_button]:min-h-11">
+          <div>
+            <p className="mb-1.5 text-sm font-medium">Difficulty</p>
+            <Segmented
+              label="Difficulty"
+              value={difficulty}
+              onChange={setDifficulty}
+              options={[
+                { value: "easy", label: "Recall" },
+                { value: "medium", label: "Understand" },
+                { value: "hard", label: "Apply" },
+              ]}
+            />
+          </div>
+          <div>
+            <p className="mb-1.5 text-sm font-medium">Questions</p>
+            <Segmented
+              label="Questions"
+              value={count}
+              onChange={setCount}
+              options={[
+                { value: "5", label: "5" },
+                { value: "8", label: "8" },
+                { value: "12", label: "12" },
+              ]}
+            />
+          </div>
+          <button className="btn-primary w-full sm:ml-auto sm:w-auto" disabled={!!busy || !p.checkedIds.length}>
             Make quiz
           </button>
         </div>
@@ -454,15 +452,15 @@ function Quizzes(p: StudyProps & { onOpen: (id: number) => void }) {
         ) : (
           <ul className="divide-y divide-line border-y border-line">
             {items.map((q) => (
-              <li key={q.id} className="group flex items-center gap-4 py-3">
-                <button type="button" onClick={() => isReady(q) && p.onOpen(q.id)} className="min-w-0 flex-1 text-left">
-                  <p className="truncate font-display text-lg group-hover:text-accent">{q.title}</p>
+              <li key={q.id} className="group flex flex-wrap items-center gap-x-4 gap-y-1 py-3">
+                <button type="button" onClick={() => isReady(q) && p.onOpen(q.id)} className="min-h-11 min-w-0 flex-1 basis-56 text-left">
+                  <p className="truncate font-display text-lg group-hover:text-accent"><MathText text={q.title} /></p>
                   {!isReady(q) ? (
                     <JobStatus a={q} onRetry={retry} />
                   ) : (
                     <p className="text-xs text-muted">
                       {q.question_count} questions · {(q.types ?? ["mcq"]).map(typeLabel).join(" + ")} ·{" "}
-                      {({ easy: "Recall", medium: "Understand", hard: "Apply" } as Record<string, string>)[q.params.difficulty ?? "medium"]}
+                      {DIFFICULTY_LABEL[q.params.difficulty ?? "medium"]}
                       {q.params.focus ? ` · ${q.params.focus}` : ""}
                     </p>
                   )}
@@ -470,6 +468,18 @@ function Quizzes(p: StudyProps & { onOpen: (id: number) => void }) {
                 <span className="text-sm text-muted">
                   {q.best != null ? `best ${q.best}/${q.total_marks ?? q.question_count}` : "not taken"}
                 </span>
+                {isReady(q) && (
+                  <button
+                    type="button"
+                    disabled={!!busy}
+                    onClick={() =>
+                      void generate(similarRequest(q, p.checkedIds), "Quiz:", { openWhenReady: p.onOpen })
+                    }
+                    className="min-h-11 text-sm text-accent underline-offset-2 hover:underline disabled:opacity-50"
+                  >
+                    Another quiz like this
+                  </button>
+                )}
                 <button type="button" title="Delete quiz" onClick={() => askConfirm(`Delete “${q.title}”?`).then((ok) => { if (ok) void remove(q.id); })} className="text-muted opacity-0 hover:text-danger group-hover:opacity-100">
                   <TrashIcon width={16} height={16} />
                 </button>
@@ -479,203 +489,5 @@ function Quizzes(p: StudyProps & { onOpen: (id: number) => void }) {
         )}
       </section>
     </>
-  );
-}
-
-function QuizRunner(p: StudyProps & { quizId: number; onExit: () => void }) {
-  const [quiz, setQuiz] = useState<ArtifactDetail | null>(null);
-  const [answers, setAnswers] = useState<Answer[]>([]);
-  const [result, setResult] = useState<QuizResult | null>(null);
-  const [checking, setChecking] = useState(false);
-  const [checkErr, setCheckErr] = useState<string | null>(null);
-
-  const blank = (qs: QuizQuestion[]): Answer[] => qs.map((q) => ((q.type ?? "mcq") === "mcq" ? -1 : ""));
-  useEffect(() => {
-    api.artifact(p.quizId).then((q) => {
-      setQuiz(q);
-      setAnswers(blank(q.content.questions ?? []));
-    });
-  }, [p.quizId]);
-
-  const questions = quiz?.content.questions ?? [];
-  const set = (qi: number, v: Answer) => setAnswers((a) => a.map((x, i) => (i === qi ? v : x)));
-  const answered = answers.filter((a) => (typeof a === "number" ? a >= 0 : !!a && a.trim() !== "")).length;
-  const hasWritten = questions.some((q) => (q.type ?? "mcq") !== "mcq");
-
-  const check = async () => {
-    setChecking(true);
-    setCheckErr(null);
-    try {
-      const r = await api.submitAttempt(p.quizId, answers.map((a) => (a === -1 || a === "" ? null : a)));
-      setResult(r);
-      tap(r.score >= r.total / 2 ? "success" : "error");
-      document.getElementById("mode-scroll")?.scrollTo({ top: 0, behavior: "smooth" });
-    } catch (e) {
-      setCheckErr((e as Error).message);
-    } finally {
-      setChecking(false);
-    }
-  };
-
-  return (
-    <div className="mx-auto max-w-3xl px-6 pt-8">
-      <button type="button" onClick={p.onExit} className="btn-ghost">
-        ← Quizzes
-      </button>
-      <h1 className="mt-4 font-display text-3xl">{quiz?.title ?? "…"}</h1>
-      {result && (
-        <div className="mt-5 flex items-center gap-4 rounded-2xl border border-line bg-card px-5 py-4">
-          <p className="font-display text-4xl">
-            {result.score}
-            <span className="text-xl text-muted">/{result.total}</span>
-          </p>
-          <p className="flex-1 text-sm text-muted">
-            {result.score === result.total
-              ? "Perfect. Try a harder quiz next."
-              : "Read the feedback below, and tap the numbers to see the passage."}
-          </p>
-          <button
-            type="button"
-            className="btn-ghost"
-            onClick={() => {
-              setResult(null);
-              setAnswers(blank(questions));
-              document.getElementById("mode-scroll")?.scrollTo({ top: 0, behavior: "smooth" });
-            }}
-          >
-            Retake
-          </button>
-        </div>
-      )}
-
-      <ol className="mt-6 space-y-8">
-        {questions.map((q, qi) => {
-          const kind = q.type ?? "mcq";
-          const r = result?.results?.[qi];
-          return (
-            <li key={qi}>
-              <p className="font-medium">
-                <span className="mr-2 text-muted">{qi + 1}.</span>
-                {q.question}
-                {kind === "long" && <span className="ml-1 whitespace-nowrap font-semibold">[{q.marks}]</span>}
-              </p>
-              {kind === "mcq" ? (
-                <div className="mt-3 grid gap-2">
-                  {(q.options ?? []).map((opt, oi) => {
-                    const chosen = answers[qi] === oi;
-                    const state = !result ? (chosen ? "chosen" : "") : oi === q.answer ? "right" : chosen ? "wrong" : "";
-                    return (
-                      <button
-                        key={oi}
-                        type="button"
-                        disabled={!!result}
-                        onClick={() => set(qi, oi)}
-                        className={`flex items-start gap-3 rounded-xl border px-4 py-2.5 text-left transition-colors ${
-                          state === "chosen"
-                            ? "border-ink bg-sunken"
-                            : state === "right"
-                              ? "border-moss bg-moss/10"
-                              : state === "wrong"
-                                ? "border-danger bg-danger-soft"
-                                : "border-line bg-card hover:border-muted"
-                        }`}
-                      >
-                        <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded border border-current text-[11px]">
-                          {String.fromCharCode(65 + oi)}
-                        </span>
-                        <span>{opt}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : kind === "short" ? (
-                <input
-                  value={typeof answers[qi] === "string" ? (answers[qi] as string) : ""}
-                  onChange={(e) => set(qi, e.target.value)}
-                  disabled={!!result}
-                  placeholder="A word or short phrase…"
-                  className={`field mt-3 w-full max-w-md ${r ? (r.correct ? "border-moss" : "border-danger") : ""}`}
-                />
-              ) : (
-                <textarea
-                  value={typeof answers[qi] === "string" ? (answers[qi] as string) : ""}
-                  onChange={(e) => set(qi, e.target.value)}
-                  disabled={!!result}
-                  rows={4}
-                  placeholder="Explain in a few sentences…"
-                  className="field mt-3 w-full resize-y font-reading leading-relaxed"
-                />
-              )}
-              {result && (
-                <div className="mt-3 border-l-2 border-line pl-3 text-sm leading-relaxed text-ink-soft">
-                  {kind === "mcq" ? (
-                    <p>
-                      {r?.correct ? "✓ " : answers[qi] === -1 ? "Skipped. " : "✗ "}
-                      {q.explanation}{" "}
-                      {quiz && <CiteMarks cite={q.cite} passages={quiz.passages} onCite={p.onCite} />}
-                    </p>
-                  ) : (
-                    <>
-                      <p>
-                        <span className={`font-semibold ${r?.correct ? "text-moss" : r && r.marks > 0 ? "text-accent" : "text-danger"}`}>
-                          {kind === "short" ? (r?.correct ? "✓ Correct" : "✗ Not quite") : `${r?.marks ?? 0}/${r?.max ?? q.marks} marks`}
-                        </span>
-                        {r?.feedback ? ` · ${r.feedback}` : ""}
-                      </p>
-                      {kind === "short" && !r?.correct && (q.accept?.length ?? 0) > 0 && (
-                        <p className="mt-1">Accepted: {q.accept!.join(" / ")}</p>
-                      )}
-                      {kind === "long" && (
-                        <ul className="mt-2 space-y-1">
-                          {(q.points ?? []).map((pt, j) => {
-                            const got = r?.points?.[j] ?? 0;
-                            return (
-                              <li key={j} className="flex items-start gap-2">
-                                <span className={`mt-0.5 grid h-5 min-w-5 shrink-0 place-items-center rounded px-1 text-[11px] font-semibold ${got > 0 ? "bg-moss text-on-accent" : "bg-sunken text-muted"}`}>
-                                  {got > 0 ? `✓${got}` : `[${pt.marks}]`}
-                                </span>
-                                <span>{pt.text}</span>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      )}
-                      <p className="mt-1">
-                        {q.explanation} {quiz && <CiteMarks cite={q.cite} passages={quiz.passages} onCite={p.onCite} />}
-                      </p>
-                    </>
-                  )}
-                </div>
-              )}
-            </li>
-          );
-        })}
-      </ol>
-
-      {!result && questions.length > 0 && (
-        <div className="mt-6 flex flex-wrap items-center gap-3 rounded-2xl border border-dashed border-line px-4 py-3 text-sm text-muted">
-          <span>Answered on paper? Number your answers (“1 B”, “2. chlorophyll”, “3. Because…”) and</span>
-          <PhotoButton
-            label="Photo of my answers"
-            busyLabel="Reading your answers…"
-            onPhotos={async (files) => {
-              const r = await api.quizPhoto(p.quizId, files);
-              setAnswers((cur) => r.answers.map((a, i) => (a === null || a === -1 ? cur[i] : a)));
-            }}
-          />
-        </div>
-      )}
-      {!result && questions.length > 0 && (
-        <div className="mt-8 flex flex-wrap items-center gap-3 pb-10">
-          <button type="button" className="btn-primary" disabled={checking} onClick={check}>
-            {checking ? (hasWritten ? "Marking your answers…" : "Checking…") : "Check answers"}
-          </button>
-          <span className="text-sm text-muted">
-            {answered}/{questions.length} answered
-          </span>
-          {checkErr && <ErrorNote text={checkErr} onClose={() => setCheckErr(null)} onRetry={check} />}
-        </div>
-      )}
-    </div>
   );
 }

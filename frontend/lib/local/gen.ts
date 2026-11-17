@@ -11,8 +11,18 @@ export type Rec = Record<string, any>;
 type Opts = { ctx?: string };
 
 export const STYLE =
-  "Write for a student. Plain text or light Markdown only; never LaTeX or $…$ math " +
-  "(write CO₂, x², → with Unicode). Use only facts found in the passages.";
+  "Write for a student. Plain text or light Markdown. Write mathematics and formulas in LaTeX: `$…$` inline " +
+  "and `$$…$$` for display equations (e.g. `$F = ma$`, `$$v = \\frac{\\Delta x}{\\Delta t}$$`), with units " +
+  "and plain words outside the maths (`$v = 3.0$ m s⁻¹`). Double-check that every `$` delimiter is balanced " +
+  "and that only maths sits between a pair. Chemical formulas and simple symbols may stay as Unicode (CO₂, →). " +
+  "Never use `$` for money: write \"5 dollars\" or \"USD 5\". Use only facts found in the passages.";
+
+/** For anything that writes questions or answers a student will see without the book open. */
+export const SELF_CONTAINED =
+  " Never refer to a figure, diagram, graph, table, page, example or exercise by number, or to anything the " +
+  "student cannot see. Every question must be answerable from its own text. If it needs data from a figure or " +
+  "table in the passages, state that data in the question. If a passage only makes sense with a missing " +
+  "diagram, skip it.";
 
 export const CITE = { type: "ARRAY", items: { type: "INTEGER" } };
 
@@ -130,7 +140,13 @@ export const EPISODE_FORMATS: Record<string, [string, string[], string]> = {
 
 const EPISODE_LENGTHS: Record<string, number> = { short: 450, medium: 1000, long: 1700 };
 
-export const focusLine = (focus?: string | null) => (focus?.trim() ? `\nFocus especially on: ${focus.trim()}` : "");
+/** A focus already expanded by ib.resolveFocus (topic code recognised) is used as written. */
+export const RESOLVED_FOCUS = /^IB .+ topic \S+ /;
+export const focusLine = (focus?: string | null) => {
+  const f = focus?.trim();
+  if (!f) return "";
+  return RESOLVED_FOCUS.test(f) ? `\n${f}` : `\nFocus especially on: ${f}`;
+};
 
 export function cleanCites(cites: unknown, n: number): number[] {
   if (!Array.isArray(cites)) return [];
@@ -143,13 +159,13 @@ const str = (x: unknown) => (typeof x === "string" ? x.trim() : "");
 
 export async function buildDeck(ps: Retrieved[], count: number, focus: string | null | undefined, o: Opts) {
   const out = await generateJson<Rec>(
-    "You write excellent flashcards for active recall. " + STYLE,
+    "You write excellent flashcards for active recall. " + STYLE + SELF_CONTAINED,
     `Passages:\n\n${passagesPrompt(ps)}\n\nWrite ${count} flashcards from these passages. Fronts are ` +
       "specific questions or prompts (not 'What is X?' for everything; mix definitions, causes, processes, " +
       "comparisons and applications). Backs are short, complete answers (1–3 sentences). One idea per card. " +
       "`cite` lists the passage numbers that support the back." + focusLine(focus),
     DECK_SCHEMA,
-    { ...o, tag: "deck" },
+    { ...o, tag: "deck", thinking: "low" },
   );
   const cards = (out.cards ?? [])
     .filter((c: Rec) => str(c.front) && str(c.back))
@@ -202,6 +218,7 @@ export async function buildQuiz(
   focus: string | null | undefined,
   types: string[] | undefined,
   o: Opts,
+  avoid?: string[],
 ) {
   const level =
     {
@@ -225,16 +242,23 @@ export async function buildQuiz(
     );
   const total = Object.values(split).reduce((a, b) => a + b, 0);
   const out = await generateJson<Rec>(
-    "You write rigorous quiz questions for students. " + STYLE,
+    "You write rigorous quiz questions for students. " + STYLE + SELF_CONTAINED,
     `Passages:\n\n${passagesPrompt(ps)}\n\nWrite ${total} questions testing ${level}:\n` +
       wanted.join("\n") +
       "\nFill every field of every question; fields that don't apply to its type are [] or 0 (e.g. a short " +
       "answer has `options` [] and `answer` 0). Mix the types through the quiz rather than grouping them. " +
       "`explanation` says why the answer is right (for mcq, also why the most tempting wrong option is wrong). " +
       "`cite` lists supporting passage numbers." +
-      focusLine(focus),
+      focusLine(focus) +
+      (avoid?.length
+        ? "\nWrite new questions. Do not repeat or closely paraphrase any of these earlier questions:\n" +
+          avoid
+            .slice(0, 30)
+            .map((s) => `- ${s}`)
+            .join("\n")
+        : ""),
     QUIZ_SCHEMA,
-    { ...o, tag: "quiz" },
+    { ...o, tag: "quiz", thinking: "low" },
   );
   const questions = (out.questions ?? []).map((x: Rec) => cleanQuizQuestion(x, ps.length)).filter(Boolean);
   if (!questions.length) throw new GeminiError("Gemini didn't produce usable questions. Try again.");
@@ -249,7 +273,7 @@ export async function buildSheet(ps: Retrieved[], subtype: string, focus: string
       "short paragraphs and flat bullet lists. Cite passages inline as [n] right after the claims they support." +
       focusLine(focus),
     SHEET_SCHEMA,
-    { ...o, tag: "sheet" },
+    { ...o, tag: "sheet", thinking: "low" },
   );
   const body = str(out.body);
   if (!body) throw new GeminiError("Gemini returned an empty sheet. Try again.");
@@ -265,7 +289,7 @@ export async function buildConceptMap(ps: Retrieved[], focus: string | null | un
       "relates to its parent. Ids are short unique strings. `cite` lists supporting passage numbers." +
       focusLine(focus),
     MAP_SCHEMA,
-    { ...o, tag: "map" },
+    { ...o, tag: "map", thinking: "low" },
   );
   const nodes: Rec[] = out.nodes ?? [];
   const ids = new Set(nodes.map((n) => n.id));
@@ -306,7 +330,7 @@ export async function buildEpisode(
       "(empty for pure banter). `summary` is one sentence describing the episode." +
       focusLine(focus),
     EPISODE_SCHEMA,
-    { ...o, tag: "episode" },
+    { ...o, tag: "episode", thinking: "low" },
   );
   const lines: Rec[] = [];
   for (const ln of out.lines ?? []) {

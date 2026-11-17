@@ -73,4 +73,15 @@ check("half-streamed maths shows as text instead of breaking", () => {
   assert.ok(html("so $x = 3").includes("so $x = 3"));
 });
 
+check("MathText renders inline maths as KaTeX and leaves dollar amounts alone", () => {
+  const MathText = ((AB as any).MathText ?? (AB as any).default?.MathText) as typeof AB.MathText;
+  const MathBlock = ((AB as any).MathBlock ?? (AB as any).default?.MathBlock) as typeof AB.MathBlock;
+  const m = renderToStaticMarkup(createElement(MathText, { text: "Slope is $\\frac{a}{b}$ and it costs $5 and $10." }));
+  assert.ok(m.includes('class="katex"') && m.includes("mfrac"), "no KaTeX fraction");
+  assert.ok(!visible(m).includes("\\frac"), "raw LaTeX visible");
+  assert.ok(visible(m).includes("costs $5 and $10."));
+  const b = renderToStaticMarkup(createElement(MathBlock, { text: "Use $$x^2$$\n\n- $y$" }));
+  assert.ok(b.includes("math-display") && b.includes("<li"));
+});
+
 console.log(`\nALL ${passed} ANSWER CHECKS PASSED`);

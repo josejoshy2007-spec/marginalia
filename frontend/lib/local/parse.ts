@@ -38,7 +38,8 @@ export function parseText(text: string, title?: string | null): ParsedDoc {
 
 const yieldToUI = () => new Promise((r) => setTimeout(r, 0));
 
-export async function parsePdf(file: Blob, onProgress?: Progress): Promise<ParsedDoc> {
+/** Open a PDF with pdf.js, reading byte ranges straight from the Blob (never the whole file in memory). */
+export async function openPdf(file: Blob) {
   // The legacy build runs on older Android WebViews (and Node) too.
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   pdfjs.GlobalWorkerOptions.workerSrc = `${BASE_PATH}/pdf.worker.min.mjs`;
@@ -53,14 +54,30 @@ export async function parsePdf(file: Blob, onProgress?: Progress): Promise<Parse
       .arrayBuffer()
       .then((buf) => transport.onDataRange(begin, new Uint8Array(buf)));
   };
-  let doc;
-  const task = pdfjs.getDocument({ range: transport, rangeChunkSize: 1 << 20, disableAutoFetch: true, disableStream: true })
-      
+  const task = pdfjs.getDocument({ range: transport, rangeChunkSize: 1 << 20, disableAutoFetch: true, disableStream: true });
   try {
-    doc = await task.promise;
+    return { doc: await task.promise, task };
   } catch (e) {
     throw new ParseError(`Could not read PDF: ${(e as Error).message}`);
   }
+}
+
+export async function pdfPageCount(file: Blob): Promise<number> {
+  const { doc, task } = await openPdf(file);
+  const n = doc.numPages;
+  await task.destroy();
+  return n;
+}
+
+/** Titles that word processors stamp into PDF metadata and that say nothing about the document. */
+export function isPlaceholderTitle(t: string): boolean {
+  const s = t.trim();
+  if (!/[\p{L}\p{N}]/u.test(s)) return true;
+  return /^(untitled|unnamed|document\d*|microsoft word.*|microsoft powerpoint.*|powerpoint presentation|slide \d+)(\.(docx?|pptx?))?$/i.test(s) || /^untitled/i.test(s);
+}
+
+export async function parsePdf(file: Blob, onProgress?: Progress): Promise<ParsedDoc> {
+  const { doc, task } = await openPdf(file);
 
   const parts: string[] = [];
   const pages: PageSpan[] = [];
@@ -102,7 +119,8 @@ export async function parsePdf(file: Blob, onProgress?: Progress): Promise<Parse
   await task.destroy();
   const text = parts.join("");
   if (!text.trim()) throw new ParseError("No extractable text in this PDF (it may be scanned images).");
-  return { title: title || "Untitled PDF", text, pages };
+  // A placeholder title ("untitled", "Microsoft Word - …") is no title: the caller then keeps the file name.
+  return { title: isPlaceholderTitle(title) ? "Untitled PDF" : title, text, pages };
 }
 
 // ---------------------------------------------------------------- web pages

@@ -75,8 +75,9 @@ export function useArtifacts(subjectId: number, kind: ArtifactKind) {
   // (a new hook instance); it announces itself so whichever list is showing now picks it up.
   useEffect(() => {
     const onChanged = (e: Event) => {
-      const d = (e as CustomEvent<{ subjectId: number; kind: ArtifactKind }>).detail;
-      if (d.subjectId === subjectId && d.kind === kind) refresh();
+      // A plain Event (no detail) means "something changed": refresh.
+      const d = (e as CustomEvent<{ subjectId?: number; kind?: ArtifactKind } | null>).detail;
+      if (!d || d.subjectId == null || d.kind == null || (d.subjectId === subjectId && d.kind === kind)) refresh();
     };
     window.addEventListener(ARTIFACTS_CHANGED, onChanged);
     return () => window.removeEventListener(ARTIFACTS_CHANGED, onChanged);

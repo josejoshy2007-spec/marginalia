@@ -1,10 +1,13 @@
 "use client";
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, pageLabel, type Citation, type Source, type SourceDetail } from "@/lib/api";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { api, pageLabel, PDF_PAGE_VIEW, type Citation, type Source, type SourceDetail } from "@/lib/api";
+import { buildBlocks, pageAt, shouldHandleFocus, type Block } from "@/lib/reflow";
 import type { Anchor, Thread } from "@/lib/threads";
 import type { Focus } from "./App";
 import MarginThread from "./MarginThread";
+import PdfPages from "./PdfPages";
+import { Segmented } from "./study/shared";
 
 type Props = {
   sources: Source[];
@@ -24,6 +27,10 @@ type Props = {
 type Range = { start: number; end: number; cls: string };
 
 const detailCache = new Map<number, SourceDetail>();
+/** Which view each PDF was last read in (kept while the app is open). */
+const viewMemo = new Map<number, "text" | "page">();
+/** Nonce of the last citation click acted on; `focus` in App is never cleared, so re-entering Read mode must not replay it. */
+let handledFocusNonce = 0;
 
 export default function ReadMode(p: Props) {
   const [detail, setDetail] = useState<SourceDetail | null>(null);
@@ -31,6 +38,35 @@ export default function ReadMode(p: Props) {
   const [flash, setFlash] = useState<{ start: number; end: number; nonce: number } | null>(null);
   const docRef = useRef<HTMLDivElement>(null);
   const { source, focus, threads } = p;
+
+  // Text (reflowed) or Page (the real PDF page). The reading position carries across by page number.
+  const [view, setView] = useState<"text" | "page">("text");
+  const [pdf, setPdf] = useState<Blob | null | undefined>(undefined);
+  const [attachErr, setAttachErr] = useState<string | null>(null);
+  const [outline, setOutline] = useState<{ page: number; nonce: number } | null>(null);
+  const [, setTick] = useState(0);
+  const onReflow = useCallback(() => setTick((t) => t + 1), []);
+  const pdfPageRef = useRef<(() => number) | null>(null);
+  const startPage = useRef(1);
+  const pendingTextPage = useRef<number | null>(null);
+  const sourceId = source?.id;
+  useEffect(() => {
+    setView(sourceId != null ? (viewMemo.get(sourceId) ?? "text") : "text");
+    pendingTextPage.current = null;
+    startPage.current = 1;
+    setOutline(null);
+  }, [sourceId]);
+  const pageView = PDF_PAGE_VIEW && source?.kind === "pdf" && view === "page";
+  const loadPdf = useCallback(() => {
+    if (sourceId == null) return () => {};
+    let live = true;
+    setPdf(undefined);
+    api.sourcePdf(sourceId).then((b) => live && setPdf(b)).catch(() => live && setPdf(null));
+    return () => {
+      live = false;
+    };
+  }, [sourceId]);
+  useEffect(() => (pageView ? loadPdf() : undefined), [pageView, loadPdf]);
 
   // Load full text for the source being read. Only finished sources are cached: a big upload that
   // was opened while still processing has empty text, and caching that left Read mode blank.
@@ -55,11 +91,20 @@ export default function ReadMode(p: Props) {
   }, [source, ready]);
 
   // Jump to a cited passage once its source is on screen: highlight first, scroll once it's rendered.
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => void (flashTimer.current && clearTimeout(flashTimer.current)), []);
   useEffect(() => {
     if (!focus || !detail || focus.sourceId !== detail.id) return;
+    if (!shouldHandleFocus(focus.nonce, handledFocusNonce)) return;
+    handledFocusNonce = focus.nonce;
     setFlash({ start: focus.start, end: focus.end, nonce: focus.nonce });
-    const t = setTimeout(() => setFlash(null), 3200);
-    return () => clearTimeout(t);
+    const pg = pageAt(detail.pages, focus.start);
+    if (pg != null) {
+      startPage.current = pg; // Page view opens here even before any smooth scroll
+      setOutline({ page: pg, nonce: focus.nonce });
+    }
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlash(null), 3200);
   }, [focus, detail]);
 
   useEffect(() => {
@@ -67,6 +112,34 @@ export default function ReadMode(p: Props) {
     const el = docRef.current?.querySelector<HTMLElement>("[data-hl-focus]") ?? findParagraph(docRef.current, flash.start);
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [flash?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Coming back from Page view: scroll the text to the page that was on screen.
+  useLayoutEffect(() => {
+    const n = pendingTextPage.current;
+    if (view !== "text" || n == null || !detail || !docRef.current) return;
+    pendingTextPage.current = null;
+    const start = detail.pages.find((pg) => pg.page === n)?.start ?? 0;
+    const sep = docRef.current.querySelector<HTMLElement>(`[data-page-sep="${n}"]`);
+    const el = sep ?? [...docRef.current.querySelectorAll<HTMLElement>("[data-p]")].find((e) => Number(e.dataset.p) >= start);
+    el?.scrollIntoView({ block: "start" });
+  }, [view, detail]);
+
+  const switchView = (v: "text" | "page") => {
+    if (!source || !detail || v === view) return;
+    if (v === "page") {
+      // Page of the first block at the top of the screen.
+      const top = (document.getElementById("mode-scroll")?.getBoundingClientRect().top ?? 0) + 96;
+      let off = 0;
+      for (const el of docRef.current?.querySelectorAll<HTMLElement>("[data-p]") ?? []) {
+        if (el.getBoundingClientRect().top > top) break;
+        off = Number(el.dataset.p);
+      }
+      startPage.current = pageAt(detail.pages, off) ?? 1;
+    } else pendingTextPage.current = pdfPageRef.current?.() ?? startPage.current;
+    viewMemo.set(source.id, v);
+    setOutline(null);
+    setView(v);
+  };
 
   // Highlight ranges change only when anchors/active thread/flash change, not on every streamed token.
   const anchorSig = threads.map((t) => (t.anchor ? `${t.id}:${t.anchor.start}-${t.anchor.end}` : "")).join("|");
@@ -131,7 +204,7 @@ export default function ReadMode(p: Props) {
 
   return (
     <div className="flex justify-center gap-12 px-4 pt-8 sm:px-14">
-      <div className="w-full max-w-[68ch] shrink-0">
+      <div className={`w-full shrink-0 ${pageView ? "max-w-[900px]" : "max-w-[66ch]"}`}>
       <header className="mb-8">
         <select
           aria-label="Source"
@@ -146,8 +219,21 @@ export default function ReadMode(p: Props) {
           ))}
         </select>
         <h1 className="font-display text-4xl leading-tight">{source.title}</h1>
+        {PDF_PAGE_VIEW && source.kind === "pdf" && detail && detail.pages.length > 0 && (
+          <div className="mt-3">
+            <Segmented
+              label="View"
+              value={view}
+              onChange={switchView}
+              options={[
+                { value: "text", label: "Text" },
+                { value: "page", label: "Page" },
+              ]}
+            />
+          </div>
+        )}
         <p className="mt-2 text-sm text-muted">
-          Select any passage to open a thread in the margin.
+          {pageView ? "Showing the original pages. Switch to Text to select a passage and ask about it." : "Select any passage to open a thread in the margin."}
           {source.url && (
             <>
               {" · "}
@@ -170,21 +256,48 @@ export default function ReadMode(p: Props) {
         !detail && !loadErr && <p className="animate-pulse text-muted">Opening…</p>
       )}
 
-      {detail && (
+      {detail && !pageView && (
         <div ref={docRef} onMouseUp={handleMouseUp} className="relative">
-          <DocumentText text={detail.text} pages={detail.pages} ranges={ranges} label={pageLabel(detail.kind).short} />
+          <DocumentText
+            text={detail.text}
+            pages={detail.pages}
+            ranges={ranges}
+            label={pageLabel(detail.kind).short}
+            onReflow={onReflow}
+          />
         </div>
       )}
+      {detail && pageView && (
+        <PageViewBody
+          pdf={pdf}
+          pageCount={detail.pages.length}
+          initialPage={startPage.current}
+          outline={outline}
+          currentPageRef={pdfPageRef}
+          err={attachErr}
+          onAttach={async (f) => {
+            setAttachErr(null);
+            try {
+              await api.attachPdf(detail.id, f);
+              loadPdf();
+            } catch (e) {
+              setAttachErr((e as Error).message);
+            }
+          }}
+        />
+      )}
       </div>
-      <MarginColumn
-        threads={detail ? threads : []}
-        docRef={docRef}
-        activeThreadId={p.activeThreadId}
-        onActivate={p.onActivate}
-        onAsk={p.onAsk}
-        onDiscard={p.onDiscard}
-        onCite={p.onCite}
-      />
+      {!pageView && (
+        <MarginColumn
+          threads={detail ? threads : []}
+          docRef={docRef}
+          activeThreadId={p.activeThreadId}
+          onActivate={p.onActivate}
+          onAsk={p.onAsk}
+          onDiscard={p.onDiscard}
+          onCite={p.onCite}
+        />
+      )}
 
       {/* Narrow screens: no margin, so the active thread floats above the command bar. */}
       {active && (
@@ -203,64 +316,143 @@ export default function ReadMode(p: Props) {
   );
 }
 
+function PageViewBody({
+  pdf,
+  pageCount,
+  initialPage,
+  outline,
+  currentPageRef,
+  err,
+  onAttach,
+}: {
+  pdf: Blob | null | undefined;
+  pageCount: number;
+  initialPage: number;
+  outline: { page: number; nonce: number } | null;
+  currentPageRef: { current: (() => number) | null };
+  err: string | null;
+  onAttach: (f: File) => void;
+}) {
+  if (pdf === undefined) return <p className="animate-pulse text-muted">Opening the pages…</p>;
+  if (pdf === null)
+    return (
+      <div className="border border-dashed border-line px-5 py-6 text-muted">
+        <p>
+          This device doesn&apos;t have the original PDF (it was added before page view existed, or came from another
+          device). Attach the same file to see the real pages. It stays on this device.
+        </p>
+        <label className="mt-4 inline-block cursor-pointer border border-line px-3 py-1.5 text-sm text-ink hover:border-accent">
+          Attach the PDF
+          <input
+            type="file"
+            accept="application/pdf,.pdf"
+            className="sr-only"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) onAttach(f);
+            }}
+          />
+        </label>
+        {err && <p className="mt-3 text-danger">{err}</p>}
+      </div>
+    );
+  return <PdfPages blob={pdf} pageCount={pageCount} initialPage={initialPage} outline={outline} currentPageRef={currentPageRef} />;
+}
+
 function Empty({ children }: { children: React.ReactNode }) {
   return <div className="mx-auto max-w-xl px-6 pt-24 font-display text-2xl leading-snug">{children}</div>;
 }
 
 // ---------------- document rendering ----------------
-
-type Para = { start: number; end: number; page?: number };
-
-function splitParagraphs(text: string, pages: { page: number; start: number }[]): Para[] {
-  const paras: Para[] = [];
-  const re = /\n{2,}/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    if (m.index > last) paras.push({ start: last, end: m.index });
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) paras.push({ start: last, end: text.length });
-  // Mark the first paragraph of each page.
-  let pi = 0;
-  for (const para of paras) {
-    while (pi < pages.length && pages[pi].start <= para.start) {
-      if (para.page === undefined) para.page = pages[pi].page;
-      pi++;
-    }
-  }
-  return paras;
-}
+// Display only: blocks come from lib/reflow.ts and carry absolute offsets into the untouched source text,
+// so selection, margin threads, citation flashes and highlights all keep working on `data-o` spans.
 
 const DocumentText = memo(function DocumentText({
   text,
   pages,
   ranges,
   label,
+  onReflow,
 }: {
   text: string;
   pages: { page: number; start: number }[];
   ranges: Range[];
   label: string;
+  onReflow: () => void;
 }) {
-  const paras = useMemo(() => splitParagraphs(text, pages), [text, pages]);
+  const blocks = useMemo(() => buildBlocks(text, pages), [text, pages]);
+  const pageName = (n: number) => (label === "p." ? `p. ${n}` : `${label} ${n}`);
   return (
     <article className="reading font-reading text-[1.08rem] leading-[1.75] text-ink-soft">
-      {paras.map((para) => (
-        <div key={para.start} className="relative" data-p={para.start} data-p-end={para.end}>
-          {para.page !== undefined && pages.length > 0 && (
-            <span className="pointer-events-none absolute -left-16 top-1 hidden w-12 select-none text-right font-sans text-[11px] tracking-wide text-muted sm:block">
-              {label === "p." ? `p.${para.page}` : `${label} ${para.page}`}
-            </span>
+      {blocks.map((b, i) => (
+        <Fragment key={b.start}>
+          {b.page !== undefined && pages.length > 0 && (
+            <div
+              data-page-sep={b.page}
+              data-p={b.start}
+              data-p-end={b.start}
+              className={`flex select-none items-center gap-3 font-sans text-[11px] tracking-wide text-muted ${i === 0 ? "mb-4" : "mb-4 mt-9"}`}
+            >
+              <span aria-hidden className="h-px flex-1 bg-line" />
+              <span>{pageName(b.page)}</span>
+              <span aria-hidden className="h-px flex-1 bg-line" />
+            </div>
           )}
-          <p className="mb-5 whitespace-pre-wrap">{renderSegments(text, para, ranges)}</p>
-        </div>
+          {b.kind === "figure" ? (
+            <FigureBlock text={text} block={b} ranges={ranges} onReflow={onReflow} />
+          ) : (
+            <div className="relative" data-p={b.start} data-p-end={b.end}>
+              {b.kind === "heading" ? (
+                <h3 className="mb-3 mt-6 font-display text-xl leading-snug text-ink">{renderSegments(text, b, ranges)}</h3>
+              ) : b.kind === "running" ? (
+                <p className="mb-2 font-sans text-xs text-muted">{renderSegments(text, b, ranges)}</p>
+              ) : (
+                <p className={b.kind === "item" ? "mb-3 pl-5" : "mb-5"}>{renderSegments(text, b, ranges)}</p>
+              )}
+            </div>
+          )}
+        </Fragment>
       ))}
     </article>
   );
 });
 
-function renderSegments(text: string, para: Para, ranges: Range[]) {
+/** Axis labels and other scraps from a figure: folded away until asked for. */
+function FigureBlock({ text, block, ranges, onReflow }: { text: string; block: Block; ranges: Range[]; onReflow: () => void }) {
+  const hit = ranges.some((r) => r.start < block.end && r.end > block.start);
+  const [open, setOpen] = useState(false);
+  const first = useRef(true);
+  useEffect(() => {
+    if (hit) setOpen(true); // a highlight or thread inside it must be visible
+  }, [hit]);
+  useEffect(() => {
+    if (first.current) first.current = false;
+    else onReflow(); // margin cards re-place themselves after the layout changed
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <div className="mb-5" data-p={block.start} data-p-end={block.end}>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full select-none items-center justify-between gap-3 border border-dashed border-line px-3 py-1.5 text-left font-sans text-xs text-muted hover:text-ink"
+      >
+        <span>Text from a figure or graph</span>
+        <span>{open ? "Hide" : `Show · ${block.lines} lines`}</span>
+      </button>
+      {open && (
+        <p className="mt-1 whitespace-pre-wrap border-l-2 border-line pl-3 font-sans text-xs leading-relaxed text-muted">
+          {renderSegments(text, block, ranges, true)}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Split a block at highlight edges into spans carrying their absolute offset. Line breaks show as spaces
+ *  (same length, so offsets stay exact) unless `keepBreaks`. */
+function renderSegments(text: string, para: { start: number; end: number }, ranges: Range[], keepBreaks = false) {
   const local = ranges.filter((r) => r.start < para.end && r.end > para.start);
   const cuts = new Set([para.start, para.end]);
   for (const r of local) {
@@ -279,9 +471,10 @@ function renderSegments(text: string, para: Para, ranges: Range[]) {
       .filter((r) => r.start <= s && r.end >= e)
       .map((r) => r.cls)
       .join(" ");
+    const piece = text.slice(s, e);
     out.push(
       <span key={s} data-o={s} className={cls || undefined} data-hl-focus={s === focusStart ? "" : undefined}>
-        {text.slice(s, e)}
+        {keepBreaks ? piece : piece.replace(/\n/g, " ")}
       </span>,
     );
   }

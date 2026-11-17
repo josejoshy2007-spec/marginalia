@@ -7,6 +7,7 @@ import { CiteMarks, ErrorNote, IBBadge, Segmented, scopeLabel, useArtifacts, Wor
 import { isReady, JobStatus } from "./study/shared";
 import { TrashIcon } from "./icons";
 import PhotoButton from "./PhotoButton";
+import { MathText } from "./AnswerBody";
 import { askConfirm } from "@/lib/confirm";
 
 type Size = "short" | "section" | "paper";
@@ -285,7 +286,7 @@ function QuestionCard({
         <span className="mt-0.5 font-display text-xl text-muted">{index + 1}.</span>
         <div className="min-w-0 flex-1">
           <p className="whitespace-pre-wrap font-medium leading-relaxed">
-            {q.question} <span className="whitespace-nowrap font-semibold">[{q.marks}]</span>
+            <MathText text={q.question} /> <span className="whitespace-nowrap font-semibold">[{q.marks}]</span>
           </p>
           <p className="mt-1 text-xs text-muted">
             <span className="rounded bg-sunken px-1.5 py-0.5 font-semibold uppercase tracking-wider text-ink-soft">{q.command_term}</span>{" "}
@@ -337,12 +338,12 @@ function QuestionCard({
             </p>
             {result.band && <span className="text-sm text-muted">Markband {result.band}</span>}
           </div>
-          {result.strengths && <p className="mt-2 text-sm"><span className="font-semibold text-moss">What earned marks: </span>{result.strengths}</p>}
-          {result.improvements && <p className="mt-1 text-sm"><span className="font-semibold text-accent">To reach full marks: </span>{result.improvements}</p>}
+          {result.strengths && <p className="mt-2 text-sm"><span className="font-semibold text-moss">What earned marks: </span><MathText text={result.strengths} /></p>}
+          {result.improvements && <p className="mt-1 text-sm"><span className="font-semibold text-accent">To reach full marks: </span><MathText text={result.improvements} /></p>}
           {result.model_answer && (
             <details className="mt-3 text-sm">
               <summary className="cursor-pointer font-medium">Full-mark answer</summary>
-              <p className="mt-2 whitespace-pre-wrap font-reading leading-relaxed text-ink-soft">{result.model_answer}</p>
+              <p className="mt-2 whitespace-pre-wrap font-reading leading-relaxed text-ink-soft"><MathText text={result.model_answer} /></p>
             </details>
           )}
         </div>
@@ -365,7 +366,7 @@ function Markscheme({ q, result }: { q: ExamQuestion; result: MarkResult | null 
               {ms.markbands.map((b, i) => (
                 <tr key={i} className={`align-top ${result?.band === b.marks ? "bg-moss/10" : ""}`}>
                   <td className="w-16 py-1.5 pr-3 font-semibold">{b.marks}</td>
-                  <td className="py-1.5">{b.descriptor}</td>
+                  <td className="py-1.5"><MathText text={b.descriptor} /></td>
                 </tr>
               ))}
             </tbody>
@@ -374,7 +375,7 @@ function Markscheme({ q, result }: { q: ExamQuestion; result: MarkResult | null 
             <>
               <p className="mt-3 text-xs font-semibold text-muted">Indicative content</p>
               <ul className="mt-1 list-disc space-y-0.5 pl-5">
-                {ms.indicative.map((x, i) => <li key={i}>{x}</li>)}
+                {ms.indicative.map((x, i) => <li key={i}><MathText text={x} /></li>)}
               </ul>
             </>
           )}
@@ -393,15 +394,15 @@ function Markscheme({ q, result }: { q: ExamQuestion; result: MarkResult | null 
                   {r ? (r.awarded > 0 ? `✓${r.awarded}` : "✗") : `[${pt.marks}]`}
                 </span>
                 <span>
-                  {pt.text}
-                  {r?.comment && <span className="block text-xs text-muted">{r.comment}</span>}
+                  <MathText text={pt.text} />
+                  {r?.comment && <span className="block text-xs text-muted"><MathText text={r.comment} /></span>}
                 </span>
               </li>
             );
           })}
         </ul>
       )}
-      {ms.notes && <p className="mt-2 text-xs italic text-muted">{ms.notes}</p>}
+      {ms.notes && <p className="mt-2 text-xs italic text-muted"><MathText text={ms.notes} /></p>}
     </div>
   );
 }

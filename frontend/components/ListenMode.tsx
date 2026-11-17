@@ -17,6 +17,7 @@ import {
 } from "./study/shared";
 import { TrashIcon, WaveIcon } from "./icons";
 import { askConfirm } from "@/lib/confirm";
+import { MathText } from "./AnswerBody";
 
 type Format = "conversation" | "brief" | "debate" | "lecture";
 type Length = "short" | "medium" | "long";
@@ -154,11 +155,11 @@ function EpisodeCard({
         <WaveIcon />
       </button>
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
-        <p className="font-display text-lg leading-snug group-hover:text-accent">{ep.title}</p>
+        <p className="font-display text-lg leading-snug group-hover:text-accent"><MathText text={ep.title} /></p>
         <p className="mt-0.5 text-xs text-muted">
           {fmt} · ~{ep.minutes} min{ep.has_audio ? " · studio audio" : ""}
         </p>
-        {ep.summary && <p className="mt-1 line-clamp-2 text-sm text-ink-soft">{ep.summary}</p>}
+        {ep.summary && <p className="mt-1 line-clamp-2 text-sm text-ink-soft"><MathText text={ep.summary} /></p>}
       </button>
       <button type="button" title="Delete episode" onClick={onDelete} className="self-start text-muted opacity-0 hover:text-danger group-hover:opacity-100">
         <TrashIcon width={16} height={16} />
@@ -213,7 +214,7 @@ function Episode(p: StudyProps & { id: number; onExit: () => void }) {
         ← Episodes
       </button>
       <h1 className="mt-4 font-display text-3xl leading-tight">{ep?.title ?? "…"}</h1>
-      {ep?.content.summary && <p className="mt-2 text-ink-soft">{ep.content.summary}</p>}
+      {ep?.content.summary && <p className="mt-2 text-ink-soft"><MathText text={ep.content.summary} /></p>}
 
       {ep && (
         <div className="sticky top-3 z-10 mt-6 rounded-2xl border border-line bg-card/95 p-4 backdrop-blur">
@@ -304,7 +305,7 @@ function Line({
         {line.speaker}
       </span>
       <p className="font-reading leading-relaxed">
-        {line.text} {cites}
+        <MathText text={line.text} /> {cites}
       </p>
     </li>
   );

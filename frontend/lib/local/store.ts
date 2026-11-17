@@ -35,9 +35,9 @@ import {
   type Rec,
 } from "./gen";
 import { GeminiError, patiently, speak, streamGenerate } from "./gemini";
-import { embedPassages, resetWorker } from "./embedder";
+import { embedPassages, resetWorker, whenIdle } from "./embedder";
 import * as ib from "./ib";
-import { parseText, parseUrl, parsePdf, ParseError, transcribeRecording, transcribeYoutube, YOUTUBE_RE } from "./parse";
+import { parseText, parseUrl, parsePdf, pdfPageCount, ParseError, transcribeRecording, transcribeYoutube, YOUTUBE_RE } from "./parse";
 import { citation, forgetSource, passageBlock, retrieve, selectPassages, summaryPassages, type Retrieved } from "./search";
 import { EMBED_DIM, getSettings } from "./settings";
 import { preview, schedule, type Grade } from "./srs";
@@ -78,14 +78,16 @@ const docsQueue = new Queue(1); // phones have little memory: one book at a time
 const mediaQueue = new Queue(1);
 const genQueue = new Queue(2);
 
-const changed = () => {
-  if (typeof window !== "undefined") window.dispatchEvent(new Event("marginalia:artifacts-changed"));
+const changed = (detail?: { subjectId: number; kind: string }) => {
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("marginalia:artifacts-changed", { detail: detail ?? null }));
 };
 
 const message = (e: unknown) =>
   e instanceof GeminiError || e instanceof ParseError || e instanceof Error ? e.message : "Something went wrong.";
 
 const uploadKey = (sourceId: number) => `upload-${sourceId}`;
+/** The original PDF, kept on this device for Read mode's page view (not synced, not in backups). */
+const pdfKey = (sourceId: number) => `pdf-${sourceId}`;
 const audioKey = (episodeId: number) => `episode-${episodeId}`;
 
 let booted: Promise<void> | null = null;
@@ -244,7 +246,7 @@ async function need<T>(p: Promise<T | undefined>, what = "Not found"): Promise<T
 
 // ---------------------------------------------------------------- sources
 
-const EMBED_BATCH = 16;
+const EMBED_BATCH = 4; // small, so a search query waits behind at most one short batch
 const INSERT_BATCH = 400;
 
 /** Per source: how many chunks have no 384-d vector yet. Counting loads the vectors, so it is cached. */
@@ -371,6 +373,7 @@ function reembedStale(): Promise<void> {
         for (let i = 0; i < stale.length; i += EMBED_BATCH) {
           const batch = stale.slice(i, i + EMBED_BATCH);
           let vecs: Float32Array[];
+          await whenIdle(); // search queries go first
           try {
             vecs = await embedPassages(batch.map((c) => c.text), { allowMain: false });
           } catch {
@@ -427,6 +430,8 @@ function submitSource(id: number) {
       await indexSource(src, (f, s) => report(share + f * (1 - share), s));
       if (!(await db.sources.get(id))) return;
       await db.sources.update(id, { status: "ready", error: null });
+      const kept = src.kind === "pdf" ? await db.blobs.get(uploadKey(id)) : undefined;
+      if (kept) await db.blobs.put({ key: pdfKey(id), blob: kept.blob, name: kept.name });
       await db.blobs.delete(uploadKey(id));
     } catch (e) {
       if (await db.sources.get(id)) await db.sources.update(id, { status: "failed", error: message(e) });
@@ -490,6 +495,7 @@ async function deleteSourceRows(id: number) {
   if (src?.status === "ready") await tombstone("sources", [src.uid]);
   await db.chunks.where("source_id").equals(id).delete();
   await db.blobs.delete(uploadKey(id));
+  await db.blobs.delete(pdfKey(id));
   await db.sources.delete(id);
   forgetSource(id);
   forgetStats(id);
@@ -497,7 +503,7 @@ async function deleteSourceRows(id: number) {
 
 // ---------------------------------------------------------------- generation
 
-const PASSAGE_BUDGET: Record<string, number> = { deck: 20, quiz: 20, sheet: 24, episode: 18, exam: 24 };
+const PASSAGE_BUDGET: Record<string, number> = { deck: 20, quiz: 14, sheet: 24, episode: 18, exam: 24 };
 
 function placeholderTitle(kind: string, subtype: string): string {
   if (kind === "sheet") return subtype === "concept_map" ? "Concept map" : (SHEETS[subtype]?.[0] ?? "Study sheet");
@@ -513,14 +519,17 @@ async function plan(subjectId: number, req: GenerateRequest): Promise<Plan> {
   const subject = await need(db.subjects.get(subjectId), "Subject not found");
   const ctx = ib.context(subject);
   const label = ib.courseLabel(subject);
+  // A topic code such as "A4" expands to the syllabus topic: retrieval uses its key terms, the prompt its scope.
+  const rf = ib.resolveFocus(req.focus, subject.ib_course, subject.ib_level);
+  const focus = rf.prompt;
   let subtype = req.subtype ?? "";
   if (req.kind === "summary") {
     subtype = subtype || "key_points";
     if (!SUMMARY_FORMATS[subtype]) throw new Error(`Unknown summary format '${subtype}'`);
-    const passages = await summaryPassages(subjectId, req.source_ids, req.focus, req.page_from, req.page_to);
+    const passages = await summaryPassages(subjectId, req.source_ids, rf.query, req.page_from, req.page_to);
     if (!passages.length) throw new Error("Nothing to summarise: check a ready source (and a page range that exists).");
     const length = SUMMARY_LENGTH[req.length ?? "medium"];
-    return { subtype, passages, produce: (r) => buildSummary(passages, subtype, length, req.focus, r, ctx) };
+    return { subtype, passages, produce: (r) => buildSummary(passages, subtype, length, focus, r, ctx) };
   }
   if (req.kind === "sheet" && !SHEETS[subtype] && subtype !== "concept_map") throw new Error(`Unknown sheet type '${subtype}'`);
   if (req.kind === "episode") {
@@ -528,30 +537,30 @@ async function plan(subjectId: number, req: GenerateRequest): Promise<Plan> {
     if (!EPISODE_FORMATS[subtype]) throw new Error(`Unknown episode format '${subtype}'`);
   }
   if (req.kind === "exam") subtype = EXAM_SIZES[subtype] ? subtype : "short";
-  const passages = await selectPassages(subjectId, req.source_ids, req.focus, PASSAGE_BUDGET[req.kind]);
+  const passages = await selectPassages(subjectId, req.source_ids, rf.query, PASSAGE_BUDGET[req.kind]);
   if (!passages.length) throw new Error("Check at least one source with text in the Library first.");
   const o = { ctx };
   const produce = async (r: (f: number, s: string) => void): Promise<Rec> => {
     switch (req.kind) {
       case "deck":
         r(0.1, "Writing the cards");
-        return buildDeck(passages, req.count ?? 15, req.focus, o);
+        return buildDeck(passages, req.count ?? 15, focus, o);
       case "quiz":
         r(0.1, "Writing the questions");
-        return buildQuiz(passages, req.count ?? 8, req.difficulty ?? "medium", req.focus, req.types, o);
+        return buildQuiz(passages, req.count ?? 8, req.difficulty ?? "medium", focus, req.types, o, req.avoid);
       case "sheet":
         if (subtype === "concept_map") {
           r(0.1, "Mapping the ideas");
-          return buildConceptMap(passages, req.focus, o);
+          return buildConceptMap(passages, focus, o);
         }
         r(0.1, "Writing the sheet");
-        return buildSheet(passages, subtype, req.focus, o);
+        return buildSheet(passages, subtype, focus, o);
       case "exam":
         r(0.1, "Writing questions and markschemes");
-        return buildExam(passages, subtype, req.extended ?? true, req.focus, label, ctx);
+        return buildExam(passages, subtype, req.extended ?? true, focus, label, ctx);
       default:
         r(0.1, "Writing the script");
-        return buildEpisode(passages, subtype, req.length ?? "medium", req.focus, o);
+        return buildEpisode(passages, subtype, req.length ?? "medium", focus, o);
     }
   };
   return { subtype, passages, produce };
@@ -595,7 +604,8 @@ async function startGeneration(artId: number, p?: Plan) {
         await db.artifacts.update(artId, { status: "failed", error: message(e), title: `${title} (failed)` });
     } finally {
       genProgress.delete(artId);
-      changed();
+      const row = await db.artifacts.get(artId).catch(() => undefined);
+      changed(row ? { subjectId: row.subject_id, kind: row.kind } : undefined);
     }
   });
 }
@@ -610,14 +620,14 @@ Requests are either questions or generation requests (quizzes, summaries, flashc
 
 When the student has highlighted a passage, treat it as the focus of their question.
 
-Write for a student: clear, compact, no filler. Use short paragraphs or flat lists; light Markdown (bold, italics, headings) is fine. Never use LaTeX or $…$ math: write formulas in plain text with Unicode where needed (CO₂, H₂O, x², →).`;
+Write for a student: clear, compact, no filler. Use short paragraphs or flat lists; light Markdown (bold, italics, headings) is fine. Write maths in LaTeX: $…$ inline and $$…$$ for display equations, with units and words outside the maths. Write money as "5 dollars" or "USD 5", never "$5".`;
 
 /** Ask AI's "Ask anything": a general tutor, not limited to (or citing) the student's sources. */
 const GENERAL_SYSTEM = `You are a patient, knowledgeable tutor helping a student study. Answer from general knowledge (the student's own sources are not attached to this conversation, so never claim something comes from "your notes" or "your sources").
 
 Be accurate and say when something is uncertain, debated, or depends on the syllabus or teacher. For problems, show the steps. Prefer explaining and checking understanding over just giving answers; for homework-style tasks, guide the student to the answer.
 
-Write clearly and compactly: short paragraphs or flat lists, light Markdown (bold, italics, headings) is fine. Never use LaTeX or $…$ math: write formulas in plain text with Unicode where needed (CO₂, x², →).`;
+Write clearly and compactly: short paragraphs or flat lists, light Markdown (bold, italics, headings) is fine. Write maths in LaTeX: $…$ inline and $$…$$ for display equations, with units and words outside the maths. Write money as "5 dollars" or "USD 5", never "$5".`;
 
 const MARKER = /\[(\d{1,3}(?:\s*[,;]\s*\d{1,3})*)\]/g;
 const PARTIAL = /\[[\d,;\s]{0,20}$/;
@@ -753,7 +763,11 @@ export async function streamChat(
   if (!general) try {
     // The embedding model reads ~512 tokens: question first, and only the start of a long highlight.
     const query = payload.selection ? `${payload.message}\n\n${payload.selection.text.slice(0, SELECTION_QUERY_CHARS)}` : payload.message;
-    hits = await retrieve(subjectId, ids, query, s.retrievalK);
+    const subj = await db.subjects.get(subjectId);
+    const topic = ib.resolveFocus(payload.message, subj?.ib_course, subj?.ib_level, { codesOnly: true });
+    hits = await retrieve(subjectId, ids, topic.topic ? `${query}
+
+${topic.query}` : query, s.retrievalK);
   } catch (e) {
     onEvent({ type: "error", message: message(e) });
     return;
@@ -990,6 +1004,18 @@ export const localApi = {
   },
   deleteSource: async (id: number): Promise<void> => deleteSourceRows(id),
 
+  /** The original PDF of a source, if this device still has it (page view in Read mode). */
+  sourcePdf: async (id: number): Promise<Blob | null> => (await db.blobs.get(pdfKey(id)))?.blob ?? null,
+  /** Attach the PDF for a source added earlier (or synced from another device). The page count must match. */
+  attachPdf: async (id: number, file: Blob): Promise<void> => {
+    const src = await need(db.sources.get(id), "Source not found");
+    if (src.kind !== "pdf") throw new Error("This source isn't a PDF.");
+    const n = await pdfPageCount(file);
+    if (src.pages.length && n !== src.pages.length)
+      throw new Error(`That PDF has ${n} pages but this source has ${src.pages.length}. Pick the same file you added.`);
+    await db.blobs.put({ key: pdfKey(id), blob: file, name: (file as File).name });
+  },
+
   artifacts: async (subjectId: number, kind?: ArtifactKind): Promise<ArtifactSummary[]> => {
     await boot();
     let rows = await db.artifacts.where("subject_id").equals(subjectId).toArray();
@@ -1053,21 +1079,19 @@ export const localApi = {
     await db.cards.where("deck_id").equals(deckId).modify({ ease: 2.5, interval_days: 0, reps: 0, lapses: 0, due_at: t, last_reviewed_at: null });
   },
 
-  submitAttempt: async (quizId: number, raw: (number | string | null)[]): Promise<QuizResult> => {
+  submitAttempt: async (quizId: number, raw: (number | string | null)[], retryAttemptId?: number): Promise<QuizResult> => {
     const art = await need(db.artifacts.get(quizId));
     const questions: Rec[] = (art.content as Rec).questions ?? [];
     const answers = [...raw, ...Array(questions.length).fill(null)].slice(0, questions.length);
-    let results;
-    try {
-      results = await markQuiz(questions, answers, ib.courseLabel(await db.subjects.get(art.subject_id)));
-    } catch (e) {
-      throw new Error(`Couldn't mark the written answers: ${message(e)}`);
-    }
+    // markQuiz keeps the locally marked results and flags AI-marked ones it couldn't mark as `pending`.
+    const results = await markQuiz(questions, answers, ib.courseLabel(await db.subjects.get(art.subject_id)));
     const score = results.reduce((s, r) => s + r.marks, 0);
     const total = results.reduce((s, r) => s + r.max, 0);
-    await db.attempts.add({ quiz_id: quizId, answers, score, total, created_at: now() });
+    let attemptId = retryAttemptId;
+    if (attemptId != null && (await db.attempts.get(attemptId))) await db.attempts.update(attemptId, { answers, score, total });
+    else attemptId = (await db.attempts.add({ quiz_id: quizId, answers, score, total, created_at: now() })) as number;
     return {
-      score, total, answers, results,
+      score, total, answers, results, attempt_id: attemptId,
       correct: questions.map((q) => ((q.type ?? "mcq") === "mcq" ? q.answer : (q.accept?.[0] ?? null))),
     };
   },

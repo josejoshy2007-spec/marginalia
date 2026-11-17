@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type ArtifactDetail, type Citation, type MapNode } from "@/lib/api";
 import { markersToTokens } from "@/lib/cite";
-import AnswerBody from "./AnswerBody";
+import AnswerBody, { MathText } from "./AnswerBody";
 import { CiteMarks, ErrorNote, scopeLabel, useArtifacts, Working, type StudyProps } from "./study/shared";
 import { isReady, JobStatus } from "./study/shared";
 import { TrashIcon } from "./icons";
@@ -171,10 +171,10 @@ function ConceptTree({ nodes, passages, onCite }: { nodes: MapNode[]; passages: 
           )}
           <div>
             <span className={depth === 0 ? "font-display text-2xl" : depth === 1 ? "font-sans font-semibold" : "font-sans"}>
-              {n.label}
+              <MathText text={n.label} />
             </span>{" "}
             <CiteMarks cite={n.cite} passages={passages} onCite={onCite} />
-            {n.note && <p className="text-sm leading-snug text-muted">{n.note}</p>}
+            {n.note && <p className="text-sm leading-snug text-muted"><MathText text={n.note} /></p>}
           </div>
         </div>
         {kids.length > 0 && isOpen && <ul className="ml-2.5">{kids.map((k) => render(k, depth + 1))}</ul>}

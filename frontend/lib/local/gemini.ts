@@ -134,6 +134,22 @@ async function checkBudget(budget: number): Promise<void> {
     throw new GeminiError(`You've used today's AI budget (${budget} calls). It resets at midnight, or raise it in Settings.`, "day", true, true);
 }
 
+export type Thinking = "minimal" | "low" | "medium" | "high";
+/** Models that rejected thinkingConfig this session: it is not sent to them again. */
+const noThinking = new Set<string>();
+const thinkingRejected = (status: number, raw: string) => status === 400 && /thinking/i.test(raw);
+
+/** Request body for one model: drops generationConfig.thinkingConfig for models that rejected it. */
+function bodyFor(o: SendOpts, model: string): string {
+  let b: Record<string, unknown> = o.endpoint ? { ...o.body, model } : o.body;
+  const gc = b.generationConfig as Record<string, unknown> | undefined;
+  if (gc?.thinkingConfig && noThinking.has(model)) {
+    const { thinkingConfig: _t, ...rest } = gc;
+    b = { ...b, generationConfig: rest };
+  }
+  return JSON.stringify(b);
+}
+
 /** POST with pacing, retries and model fallback. Returns an OK Response or throws GeminiError. */
 export async function send(o: SendOpts): Promise<Response> {
   const s = await getSettings();
@@ -151,7 +167,7 @@ export async function send(o: SendOpts): Promise<Response> {
     const model = models[mi];
     const url = new URL(o.endpoint ? `${GEMINI_BASE}/${o.endpoint}` : `${GEMINI_BASE}/models/${model}:${o.action}`);
     for (const [k, v] of Object.entries(o.params ?? {})) url.searchParams.set(k, v);
-    const body = JSON.stringify(o.endpoint ? { ...o.body, model } : o.body);
+    let body = bodyFor(o, model);
     let res: Response | null = null;
     for (let attempt = 0; attempt < MODEL_ATTEMPTS; attempt++) {
       if (cap.left <= 0) {
@@ -185,6 +201,12 @@ export async function send(o: SendOpts): Promise<Response> {
         parsed = JSON.parse(raw);
       } catch {}
       last = { status: res.status, body: parsed, raw };
+      if (thinkingRejected(res.status, raw) && !noThinking.has(model) && (o.body.generationConfig as Record<string, unknown> | undefined)?.thinkingConfig) {
+        noThinking.add(model); // retry once on this model without the field
+        body = bodyFor(o, model);
+        cap.left++;
+        continue;
+      }
       if (res.status === 404) cap.left++; // a retired model name in the list should not eat the call's allowance
       if (res.status === 429) {
         const { delay, daily } = quotaInfo(parsed);
@@ -289,13 +311,20 @@ export async function generateJson<T = Record<string, unknown>>(
     tag?: string;
     /** Estimated input size in tokens: above CEREBRAS_MAX_INPUT_TOKENS the request skips Cerebras (its context is too small). */
     inputTokens?: number;
+    /** Gemini 3 thinking level (omit for the model's default). */
+    thinking?: Thinking;
   } = {},
 ): Promise<T> {
   const s = await getSettings();
   const body = {
     systemInstruction: { parts: [{ text: system + (opts.ctx ?? "") }] },
     contents: [{ role: "user", parts: [...(opts.parts ?? []), { text: prompt }] }],
-    generationConfig: { maxOutputTokens: s.maxTokens, responseMimeType: "application/json", responseSchema: schema },
+    generationConfig: {
+      maxOutputTokens: s.maxTokens,
+      responseMimeType: "application/json",
+      responseSchema: schema,
+      ...(opts.thinking ? { thinkingConfig: { thinkingLevel: opts.thinking } } : {}),
+    },
   };
   const cap = { left: CALL_CAP };
   const viaGemini = async (models: string[]): Promise<T> => {
@@ -331,13 +360,16 @@ export async function generateJson<T = Record<string, unknown>>(
 export async function generateText(
   system: string,
   prompt: string,
-  opts: { parts?: Part[]; tools?: Part[]; signal?: AbortSignal; tag?: string } = {},
+  opts: { parts?: Part[]; tools?: Part[]; signal?: AbortSignal; tag?: string; thinking?: Thinking } = {},
 ): Promise<{ text: string; finish: string | null }> {
   const s = await getSettings();
   const body: Record<string, unknown> = {
     systemInstruction: { parts: [{ text: system }] },
     contents: [{ role: "user", parts: [...(opts.parts ?? []), { text: prompt }] }],
-    generationConfig: { maxOutputTokens: s.maxTokens },
+    generationConfig: {
+      maxOutputTokens: s.maxTokens,
+      ...(opts.thinking ? { thinkingConfig: { thinkingLevel: opts.thinking } } : {}),
+    },
   };
   if (opts.tools) body.tools = opts.tools;
   const models = mainModels(s).concat(liteModels(s));
@@ -358,8 +390,10 @@ export async function generateText(
 export async function* streamGenerate(
   body: Record<string, unknown>,
   signal?: AbortSignal,
-  opts: { tag?: string } = {},
+  opts: { tag?: string; thinking?: Thinking } = {},
 ): AsyncGenerator<{ text?: string; finish?: string | null }> {
+  if (opts.thinking)
+    body = { ...body, generationConfig: { ...(body.generationConfig as object), thinkingConfig: { thinkingLevel: opts.thinking } } };
   const cap = { left: CALL_CAP };
   const opened = await routed<{ res: Response; cerebras: boolean }>({
     tag: opts.tag,

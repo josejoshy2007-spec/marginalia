@@ -23,9 +23,10 @@ type WorkerLike = {
 };
 
 /** How long a worker may stay silent before it is declared dead. The first call includes loading the model. */
-export type EmbedTimeouts = { first: number; passage: number; query: number; ready: number };
+export type EmbedTimeouts = { first: number; passage: number; query: number; ready: number; queryBusy: number };
+/** `queryBusy`: a query's limit while a passage batch is ahead of it in the worker (its wait is not the worker's fault). */
 /** `ready`: the worker script must announce itself within this long, or it never started (e.g. blocked bootstrap). */
-const DEFAULT_TIMEOUTS: EmbedTimeouts = { first: 180_000, passage: 120_000, query: 20_000, ready: 10_000 };
+const DEFAULT_TIMEOUTS: EmbedTimeouts = { first: 180_000, passage: 120_000, query: 20_000, ready: 10_000, queryBusy: 45_000 };
 let timeouts = DEFAULT_TIMEOUTS;
 let workerFactory: (() => WorkerLike) | null = null;
 let mainEmbedder: Embedder = embedLocal;
@@ -127,8 +128,20 @@ function getWorker(): WorkerLike | null {
   }
 }
 
-function viaWorker(w: WorkerLike, texts: string[], kind: "query" | "passage"): Promise<Float32Array[]> {
-  const ms = !workerLoaded ? timeouts.first : kind === "query" ? timeouts.query : timeouts.passage;
+let passagesInFlight = 0; // passage batches sent to the worker and not yet answered
+
+async function viaWorker(w: WorkerLike, texts: string[], kind: "query" | "passage"): Promise<Float32Array[]> {
+  if (kind !== "passage") return sendToWorker(w, texts, kind);
+  passagesInFlight++;
+  try {
+    return await sendToWorker(w, texts, kind);
+  } finally {
+    passagesInFlight--;
+  }
+}
+
+function sendToWorker(w: WorkerLike, texts: string[], kind: "query" | "passage"): Promise<Float32Array[]> {
+  const ms = !workerLoaded ? timeouts.first : kind === "query" ? (passagesInFlight > 0 ? timeouts.queryBusy : timeouts.query) : timeouts.passage;
   return new Promise<Float32Array[]>((resolve, reject) => {
     const id = nextId++;
     const timer = setTimeout(() => {
@@ -152,7 +165,30 @@ function viaWorker(w: WorkerLike, texts: string[], kind: "query" | "passage"): P
   });
 }
 
+let queriesInFlight = 0;
+let idleWaiters: (() => void)[] = [];
+/** Resolves once no search query is being embedded. Background fills call this before each batch so a query waits at most one small batch. */
+export function whenIdle(): Promise<void> {
+  return queriesInFlight === 0 ? Promise.resolve() : new Promise<void>((r) => idleWaiters.push(r));
+}
+function queryDone() {
+  if (--queriesInFlight > 0) return;
+  const w = idleWaiters;
+  idleWaiters = [];
+  for (const r of w) r();
+}
+
 export const embedder: Embedder = async (texts, kind) => {
+  if (kind !== "query") return embedderRun(texts, kind);
+  queriesInFlight++;
+  try {
+    return await embedderRun(texts, kind);
+  } finally {
+    queryDone();
+  }
+};
+
+const embedderRun: Embedder = async (texts, kind) => {
   if (override) return override(texts, kind);
   if (!texts.length) return [];
   const w = getWorker();

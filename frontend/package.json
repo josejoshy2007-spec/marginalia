@@ -15,7 +15,9 @@
     "test:search": "tsx scripts/search-test.mts",
     "test:reuse": "tsx scripts/reuse-test.mts",
     "test:providers": "tsx scripts/providers-test.mts",
-    "test:answers": "tsx scripts/answer-test.mts"
+    "test:answers": "tsx scripts/answer-test.mts",
+    "test:reflow": "tsx scripts/reflow-test.mts",
+    "test:ib": "tsx scripts/ib-test.mts"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

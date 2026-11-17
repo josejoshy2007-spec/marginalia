@@ -76,7 +76,7 @@ export async function buildSummary(
         "claims they support. Put the whole summary in `body` (Markdown); `title` names the material." +
         fl,
       SHEET_SCHEMA,
-      { ctx, tag: "summary", inputTokens: total },
+      { ctx, tag: "summary", inputTokens: total, thinking: "low" },
     );
     return finish(out, label, 1);
   }
@@ -101,7 +101,7 @@ export async function buildSummary(
           "shown. Put the notes in `body`; `title` names this part's topic." +
           fl,
         SHEET_SCHEMA,
-        { ctx, tag: "summary", inputTokens: partTokens },
+        { ctx, tag: "summary", inputTokens: partTokens, thinking: "low" },
       ),
       2,
       undefined,
@@ -120,7 +120,7 @@ export async function buildSummary(
         "`body` (Markdown); `title` names the material." +
         fl,
       SHEET_SCHEMA,
-      { ctx, tag: "summary" },
+      { ctx, tag: "summary", thinking: "low" },
     ),
   );
   return finish(out, label, groups.length);

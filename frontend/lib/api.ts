@@ -75,6 +75,8 @@ export type GenerateRequest = {
   page_to?: number | null;
   extended?: boolean;
   types?: ("mcq" | "short" | "long")[];
+  /** Quizzes: question stems of the quiz this one should differ from (ignored by generators that do not read it). */
+  avoid?: string[];
 };
 
 export type ArtifactSummary = {
@@ -174,7 +176,9 @@ export type QuizResult = {
   total: number;
   answers: (number | string | null)[];
   correct: (number | string | null)[];
-  results: { type: string; marks: number; max: number; correct: boolean; feedback: string; points: number[] }[];
+  results: { type: string; marks: number; max: number; correct: boolean; feedback: string; points: number[]; pending?: boolean; error?: string }[];
+  /** Local engine: the saved attempt, so a retry of pending questions updates it instead of adding another. */
+  attempt_id?: number;
 };
 export type MapNode = { id: string; parent: string; label: string; note: string; cite: number[] };
 export type EpisodeLine = { speaker: string; text: string; cite: number[] };
@@ -294,7 +298,7 @@ const serverApi = {
   gradeCard: (cardId: number, grade: Grade) =>
     send(`/cards/${cardId}/review`, "POST", { grade }).then((r) => json<CardItem>(r)),
   resetDeck: (deckId: number) => send(`/artifacts/${deckId}/reset`, "POST").then((r) => json<void>(r)),
-  submitAttempt: (quizId: number, answers: (number | string | null)[]) =>
+  submitAttempt: (quizId: number, answers: (number | string | null)[], _retryAttemptId?: number) =>
     send(`/artifacts/${quizId}/attempts`, "POST", { answers }).then((r) => json<QuizResult>(r)),
   renderAudio: (episodeId: number) =>
     send(`/artifacts/${episodeId}/audio`, "POST").then((r) => json<ArtifactSummary>(r)),
@@ -326,7 +330,15 @@ const serverApi = {
   },
   retrySource: (id: number) => send(`/sources/${id}/retry`, "POST").then((r) => json<Source>(r)),
   deleteSource: (id: number) => send(`/sources/${id}`, "DELETE").then((r) => json<void>(r)),
+  /** Page view in Read mode is on-device only; the laptop server keeps no original PDF. */
+  sourcePdf: async (_id: number): Promise<Blob | null> => null,
+  attachPdf: async (_id: number, _file: Blob): Promise<void> => {
+    throw new Error("Page view is only available in the phone and web app.");
+  },
 };
+
+/** Read mode can show the real PDF pages (needs the original file kept on the device). */
+export const PDF_PAGE_VIEW = ENGINE === "local";
 
 export const api: typeof serverApi = ENGINE === "local" ? localApi : serverApi;
 

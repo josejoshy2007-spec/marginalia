@@ -64,12 +64,52 @@ export function fitSchema(schema: Rec, v: unknown): unknown {
   return v;
 }
 
+const TEX_COMMANDS = [
+  "frac", "dfrac", "tfrac", "theta", "vartheta", "times", "tan", "tanh", "nu", "neq", "ne", "nabla", "beta", "bar", "rho", "right",
+  "left", "alpha", "sqrt", "sum", "int", "pi", "cdot", "cdots", "approx", "leq", "geq", "le", "ge", "Delta", "delta", "omega",
+  "Omega", "lambda", "Lambda", "mu", "sigma", "Sigma", "phi", "varphi", "vec", "hat", "text", "textbf", "mathrm", "mathbf", "infty",
+  "partial", "lim", "log", "ln", "sin", "cos", "sec", "csc", "cot", "quad", "qquad", "pm", "mp", "to", "rightarrow", "Rightarrow",
+  "leftarrow", "Leftarrow", "leftrightarrow", "epsilon", "varepsilon", "gamma", "Gamma", "eta", "zeta", "kappa", "tau", "psi",
+  "Psi", "xi", "chi", "iota", "ell", "hbar", "perp", "parallel", "angle", "circ", "degree", "ldots", "dots", "overline",
+  "underline", "binom", "begin", "end", "forall", "exists", "in", "notin", "subset", "cup", "cap", "equiv", "sim", "propto",
+  "div", "min", "max", "exp", "det", "prod", "oint", "mid", "ast", "star", "neg", "land", "lor", "rangle", "langle", "boldsymbol",
+];
+const TEX_AT = new RegExp(`^\\\\(?:${[...TEX_COMMANDS].sort((a, b) => b.length - a.length).join("|")})(?![A-Za-z])`);
+
+/**
+ * Inside JSON string literals, a single backslash before a known TeX command becomes a doubled one. `\frac` is valid
+ * JSON (form feed + "rac") and would silently corrupt the maths. Existing doubled pairs are left alone.
+ */
+export function repairTexEscapes(raw: string): string {
+  let out = "";
+  let inStr = false;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (!inStr) {
+      if (c === '"') inStr = true;
+      out += c;
+    } else if (c === '"') {
+      inStr = false;
+      out += c;
+    } else if (c === "\\") {
+      if (raw[i + 1] === "\\") {
+        out += "\\\\";
+        i++;
+      } else out += TEX_AT.test(raw.slice(i, i + 20)) ? "\\\\" : c;
+    } else out += c;
+  }
+  return out;
+}
+
 /** Pull the JSON object out of a reply, tolerating ```json fences or a sentence around it. */
 export function parseJsonReply(text: string): unknown {
-  const t = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const t = repairTexEscapes(text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
   try {
     return JSON.parse(t);
   } catch {
+    try {
+      return JSON.parse(t.replace(/\\(?!["\\/bfnrtu])/g, "\\\\")); // other LaTeX such as \alpha left single-escaped
+    } catch {}
     const a = t.indexOf("{");
     const b = t.lastIndexOf("}");
     if (a >= 0 && b > a) return JSON.parse(t.slice(a, b + 1));
@@ -93,7 +133,7 @@ export async function cerebrasJson<T>(key: string, model: string, body: Rec, sch
   const msgs = toMessages(
     body,
     "\n\nReply with a single JSON object and nothing else. It must match this JSON Schema, with every " +
-      `property present (use [] or "" or 0 when one doesn't apply):\n${schemaText(schema)}`,
+      `property present (use [] or "" or 0 when one doesn't apply). Inside JSON strings write every backslash of LaTeX doubled (\\frac, \\theta):\n${schemaText(schema)}`,
   );
   const res = await post(key, model, msgs, { response_format: { type: "json_object" } }, signal);
   const data = await res.json();

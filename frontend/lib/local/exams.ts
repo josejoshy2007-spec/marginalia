@@ -3,7 +3,7 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { GeminiError, generateJson } from "./gemini";
-import { CITE, STYLE, cleanCites, focusLine, questionMarks, type Rec } from "./gen";
+import { CITE, SELF_CONTAINED, STYLE, cleanCites, focusLine, questionMarks, type Rec } from "./gen";
 import { COMMAND_TERMS, MARKING_RULES, commandTermsBlock } from "./ib";
 import { passagesPrompt, type Retrieved } from "./search";
 
@@ -80,6 +80,8 @@ export const EXAM_SIZES: Record<string, number> = { short: 15, section: 30, pape
 const EXAMINER = () =>
   "You are an experienced IB senior examiner who writes exam questions and markschemes. " +
   STYLE +
+  SELF_CONTAINED +
+  " Markers cannot see diagrams the student drew: judge only what the answer says in words, numbers and equations, and never expect a sketch you cannot see." +
   "\n\n" +
   MARKING_RULES +
   "\n\nIB command terms:\n" +
@@ -181,7 +183,7 @@ export async function draftMarkscheme(
       "Return a single-item `questions` array: copy the question text, identify its command term, set " +
       `\`marks\` to ${marks}, and use markbands only for an extended Discuss/Evaluate/To-what-extent item.`,
     EXAM_SCHEMA,
-    { ctx, geminiOnly: true, tag: "markscheme" },
+    { ctx, geminiOnly: true, tag: "markscheme", thinking: "medium" },
   );
   const qs = (out.questions ?? []).map((x: Rec) => cleanQuestion(x, ps.length)).filter(Boolean) as Rec[];
   if (!qs.length) throw new GeminiError("Couldn't build a markscheme for that question. Try rephrasing it.");
@@ -208,7 +210,7 @@ function schemeText(q: Rec): string {
 export async function markAnswer(question: Rec, answer: string, courseLabel: string) {
   const term = question.command_term ?? "";
   const out = await generateJson<Rec>(
-    MARKING_RULES + "\nGive feedback a student can act on, in the second person, briefly.",
+    MARKING_RULES + "\nYou cannot see diagrams or sketches: never expect one in an answer; judge what the words, numbers and equations say.\nGive feedback a student can act on, in the second person, briefly.",
     `Course: ${courseLabel || "IB Diploma"}\nQuestion [${question.marks}]: ${question.question}\n` +
       `Command term: ${term} (${COMMAND_TERMS[term]?.[1] ?? ""})\n\n${schemeText(question)}\n\n` +
       `Student answer:\n<answer>\n${answer.trim()}\n</answer>\n\n` +
@@ -218,7 +220,7 @@ export async function markAnswer(question: Rec, answer: string, courseLabel: str
       "`strengths`/`improvements`, and leave `points` empty. `model_answer` is a concise answer that would " +
       "earn full marks.",
     MARK_SCHEMA,
-    { geminiOnly: true, tag: "exam-mark" },
+    { geminiOnly: true, tag: "exam-mark", thinking: "medium" },
   );
   const max = question.marks;
   const ms = question.markscheme;
@@ -281,7 +283,7 @@ const norm = (t: string) =>
     .trim()
     .replace(/^[ .]+|[ .]+$/g, "");
 
-export type QuizMark = { type: string; marks: number; max: number; correct: boolean; feedback: string; points: number[] };
+export type QuizMark = { type: string; marks: number; max: number; correct: boolean; feedback: string; points: number[]; pending?: boolean; error?: string };
 
 /** MCQ and exact short answers are marked here; the rest go to Gemini in one request. */
 export async function markQuiz(questions: Rec[], answers: unknown[], courseLabel: string): Promise<QuizMark[]> {
@@ -318,8 +320,11 @@ export async function markQuiz(questions: Rec[], answers: unknown[], courseLabel
     const scheme = q.points.map((pt: Rec, j: number) => `${j}. ${pt.text} [${pt.marks}]`).join("\n");
     return `<item index="${i}" type="long" marks="${q.marks}">\nQuestion: ${q.question}\nMarkscheme points:\n${scheme}\nStudent answer: ${a}\n</item>`;
   });
-  const out = await generateJson<Rec>(
+  let out: Rec;
+  try {
+    out = await generateJson<Rec>(
     MARKING_RULES +
+      "\nYou cannot see diagrams or sketches: never expect one in an answer; judge what the words, numbers and equations say." +
       "\nFor short answers: award the mark if the student's answer means the same as an accepted answer " +
       "(synonyms, equivalent units, minor misspellings that don't change the meaning are fine); a different or " +
       "vaguer concept gets 0. Feedback is one short sentence in the second person.",
@@ -328,8 +333,14 @@ export async function markQuiz(questions: Rec[], answers: unknown[], courseLabel
       "\n\nReturn one result per item: its `index`, `marks_awarded`, for long items `points_awarded` (marks " +
       "per markscheme point, in order), and a `comment` saying what earned or missed marks.",
     QUIZ_MARK_SCHEMA,
-    { geminiOnly: true, tag: "quiz-mark" },
-  );
+    { geminiOnly: true, tag: "quiz-mark", thinking: "low" },
+    );
+  } catch (e) {
+    // Keep the locally marked results; flag the AI-marked ones so the UI can retry just those.
+    const error = e instanceof Error ? e.message : "Couldn't reach the marker.";
+    for (const i of pending) Object.assign(results[i], { pending: true, error });
+    return results;
+  }
   const byIndex = new Map<number, Rec>();
   for (const r of out.results ?? []) if (Number.isInteger(r.index)) byIndex.set(r.index, r);
   for (const i of pending) {

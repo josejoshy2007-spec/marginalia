@@ -32,6 +32,22 @@ export default function AnswerBody({ body, citations, onCite, streaming, variant
   );
 }
 
+const NO_CITES: Cite = { citations: [], onCite: () => {} };
+
+/** Inline AI-written text with LaTeX maths ($…$), **bold**, *italic* and `code`; no citations. */
+export function MathText({ text, className }: { text: string; className?: string }) {
+  return <span className={className}>{renderInline(text ?? "", "m", NO_CITES)}</span>;
+}
+
+/** Multi-line AI-written text (paragraphs, lists, display maths) without citations. */
+export function MathBlock({ text, className }: { text: string; className?: string }) {
+  return (
+    <div className={className}>
+      <AnswerBody body={text ?? ""} citations={[]} onCite={() => {}} />
+    </div>
+  );
+}
+
 /** Display maths written over several lines ($$ … $$ or \[ … \]) becomes one line, so blocks stay simple. */
 function joinDisplayMath(lines: string[]): string[] {
   const out: string[] = [];

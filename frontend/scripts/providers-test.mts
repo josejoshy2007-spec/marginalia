@@ -11,6 +11,7 @@ import { fitSchema, parseJsonReply, toMessages } from "../lib/local/cerebras";
 
 type Reply = { status: number; body?: unknown; sse?: string[] };
 let calls: string[] = [];
+let bodies: any[] = [];
 let script: (who: string) => Reply;
 
 const DAILY = {
@@ -27,6 +28,7 @@ globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
     ? `cerebras:${JSON.parse(String(init?.body)).model}`
     : `gemini:${/models\/([^:]+):/.exec(url)?.[1]}`;
   calls.push(who);
+  try { bodies.push(JSON.parse(String(init?.body))); } catch { bodies.push(null); }
   const r = script(who);
   if (r.sse) {
     const enc = new TextEncoder();
@@ -48,6 +50,7 @@ const SCHEMA = {
 let passed = 0;
 const check = async (label: string, fn: () => Promise<void> | void) => {
   calls = [];
+  bodies = [];
   await clearExhausted();
   await resetUsage();
   await saveSettings({ dailyBudget: 750 });
@@ -135,6 +138,12 @@ await check("chat streams from Cerebras when Gemini is out, with Gemini's finish
 await check("Gemini bodies become OpenAI messages (model → assistant, system first)", () => {
   const m = toMessages({ systemInstruction: { parts: [{ text: "S" }] }, contents: [{ role: "user", parts: [{ text: "a" }] }, { role: "model", parts: [{ text: "b" }] }] }, "!");
   assert.deepEqual(m, [{ role: "system", content: "S!" }, { role: "user", content: "a" }, { role: "assistant", content: "b" }]);
+});
+
+await check("single-escaped LaTeX in Cerebras JSON survives (frac, theta, mixed doubled sqrt and alpha)", () => {
+  assert.deepEqual(parseJsonReply('{"a": "$\\frac{1}{2}$ and \\theta"}'), { a: "$\\frac{1}{2}$ and \\theta" });
+  assert.deepEqual(parseJsonReply('{"a": "$\\\\sqrt{2} + \\alpha \\times \\nu$"}'), { a: "$\\sqrt{2} + \\alpha \\times \\nu$" });
+  assert.deepEqual(parseJsonReply('{"a": "line1\\nline2 \\"q\\""}'), { a: 'line1\nline2 "q"' });
 });
 
 await check("JSON replies with chatter around them still parse; numbers and booleans are coerced", () => {
@@ -229,6 +238,26 @@ await check("an input over ~60k tokens skips Cerebras (it can't hold it); a smal
   calls = [];
   assert.equal((await generateJson<any>("sys", "p", SCHEMA, { inputTokens: 20_000 })).title, "C");
   assert.ok(calls.some((c) => c.startsWith("cerebras")));
+});
+
+await check("thinking level is sent as thinkingConfig; a 400 about it retries once without it and is remembered", async () => {
+  script = (w) => ({ status: 200, body: gem({ title: "T", cards: [] }) });
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA, { thinking: "low" })).title, "T");
+  assert.deepEqual(bodies[0].generationConfig.thinkingConfig, { thinkingLevel: "low" });
+  calls = []; bodies = [];
+  await generateJson<any>("sys", "p", SCHEMA);
+  assert.equal(bodies[0].generationConfig.thinkingConfig, undefined);
+  calls = []; bodies = [];
+  let n = 0;
+  script = () => (n++ === 0 ? { status: 400, body: { error: { message: "Unknown name \"thinkingConfig\": Cannot find field." } } } : { status: 200, body: gem({ title: "R", cards: [] }) });
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA, { thinking: "medium" })).title, "R");
+  assert.deepEqual(calls, ["gemini:main", "gemini:main"]);
+  assert.ok(bodies[0].generationConfig.thinkingConfig);
+  assert.equal(bodies[1].generationConfig.thinkingConfig, undefined);
+  calls = []; bodies = [];
+  script = () => ({ status: 200, body: gem({ title: "Z", cards: [] }) });
+  await generateJson<any>("sys", "p", SCHEMA, { thinking: "low" });
+  assert.equal(bodies[0].generationConfig.thinkingConfig, undefined); // remembered for this model
 });
 
 await check("uploading a 17 MB file counts one Gemini call (the start), not one per 8 MB piece", async () => {
