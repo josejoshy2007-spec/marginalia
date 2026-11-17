@@ -452,7 +452,12 @@ function SourceCard({ source: s, setSources, onSourcesChanged, onOpen }: Props &
             )}
           </p>
         ) : (
-          <p className="mt-1 text-xs text-muted">{meta}</p>
+          <>
+            <p className="mt-1 text-xs text-muted">{meta}</p>
+            {s.status === "ready" && s.search_progress != null && s.search_progress < 1 && (
+              <p className="mt-0.5 text-xs text-muted">Improving search… {Math.round(s.search_progress * 100)}%</p>
+            )}
+          </>
         )}
         {s.url && <p className="mt-1 truncate text-xs text-muted">{s.url}</p>}
       </button>

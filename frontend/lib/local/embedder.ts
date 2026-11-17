@@ -81,6 +81,17 @@ export function configureEmbedderForTests(o: { worker?: () => WorkerLike; timeou
   workerLoaded = false;
 }
 
+/**
+ * Let a later background attempt start a fresh worker after the old one was given up on. Only acts when
+ * no worker is currently alive (never kills a working one); the broken one was already terminated.
+ */
+export function resetWorker() {
+  if (worker) return;
+  workerBroken = false;
+  workerLoaded = false;
+  clearReadyTimer();
+}
+
 function getWorker(): WorkerLike | null {
   if (workerBroken) return null;
   if (worker) return worker;

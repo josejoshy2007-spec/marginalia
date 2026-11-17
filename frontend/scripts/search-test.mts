@@ -118,17 +118,14 @@ const kw2 = await retrieve(subject.id, [legacyId], "magma lava volcano", 1);
 assert.equal(kw2[0].chunk.ord, 0);
 ok("re-embed: 384-d, same text and offsets, status still ready, vector search works, 0 Gemini calls");
 
-// 3b. Long passages are windowed so the tail is embedded too.
+// 3b. A passage is embedded from its first PASSAGE_CHARS characters only (single window, no averaging).
 {
-  const { windows, WINDOW_CHARS } = await import("../lib/local/embed-core");
-  const long = "x".repeat(4000);
-  const w = windows(long);
-  assert.ok(w.length >= 3 && w.every((x) => x.length <= WINDOW_CHARS));
-  assert.equal(windows("short").length, 1);
-  const tail = "The mitochondrion produces ATP. ".repeat(80);
-  const t = windows("a".repeat(100) + tail);
-  assert.ok(t[t.length - 1].endsWith(tail.slice(-40)), "last window reaches the end");
-  ok(`long passages split into overlapping ${WINDOW_CHARS}-char windows (4000 chars -> ${w.length}), last one ends at the end`);
+  const { passageText, PASSAGE_CHARS } = await import("../lib/local/embed-core");
+  assert.equal(passageText("x".repeat(4000)).length, PASSAGE_CHARS);
+  assert.equal(passageText("short"), "short");
+  const t = "a".repeat(PASSAGE_CHARS) + "tail";
+  assert.ok(!passageText(t).includes("tail"));
+  ok(`passages use a single window of their first ${PASSAGE_CHARS} characters`);
 }
 
 // 3b. A worker that never answers, errors silently or fails to load the model must not hang indexing or chat.
@@ -210,13 +207,12 @@ if (!process.argv.includes("--no-model")) {
   const dot = (a: Float32Array, b: Float32Array) => a.reduce((s, x, i) => s + x * b[i], 0);
   const [sr, su] = [dot(q, rel), dot(q, unrel)];
   assert.ok(sr > su + 0.1, `related ${sr} should beat unrelated ${su}`);
-  // A passage whose answer sits past the 512-token cut-off is still found through its later window.
+  // Single window: a long passage is represented by its first PASSAGE_CHARS characters (a fact in the head is found).
   const filler = "The French parliament voted on the new budget for road maintenance and bridges. ".repeat(40);
-  const tailFact = "Photosynthesis uses sunlight, water and carbon dioxide to produce glucose in chloroplasts.";
-  const [longV, otherV] = await embedLocal([filler + tailFact, filler], "passage");
-  const [sugarQ] = await embedLocal(["How do plants make sugar from light?"], "query");
-  assert.ok(Math.abs(Math.hypot(...longV) - 1) < 1e-3, "windowed vector is unit length");
-  assert.ok(dot(sugarQ, longV) > dot(sugarQ, otherV), "tail of a long passage is represented");
+  const headFact = "Photosynthesis uses sunlight, water and carbon dioxide to produce glucose in chloroplasts. ";
+  const [longV, otherV] = await embedLocal([headFact + filler, filler], "passage");
+  assert.ok(Math.abs(Math.hypot(...longV) - 1) < 1e-3, "vector is unit length");
+  assert.ok(dot(q, longV) > dot(q, otherV), "head of a long passage is represented");
   assert.equal(geminiCalls, 0);
   ok(`real bge-small model: 384-d unit vectors, related ${sr.toFixed(3)} > unrelated ${su.toFixed(3)} (${Date.now() - t0} ms)`);
 }

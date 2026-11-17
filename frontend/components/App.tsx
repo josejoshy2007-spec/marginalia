@@ -166,11 +166,18 @@ export default function App() {
 
   // While a recording is being transcribed, poll so the progress bar moves and it turns "ready".
   const transcribing = sources.some((s) => s.status === "processing");
+  const improving = sources.some((s) => s.status === "ready" && s.search_progress != null && s.search_progress < 1);
   useEffect(() => {
-    if (!transcribing) return;
-    const t = setInterval(() => refreshSources(), 3000);
+    // The background search fill resumed after a pause: show its progress (and poll) again.
+    const onResumed = () => refreshSources();
+    window.addEventListener("marginalia:search-resumed", onResumed);
+    return () => window.removeEventListener("marginalia:search-resumed", onResumed);
+  }, [refreshSources]);
+  useEffect(() => {
+    if (!transcribing && !improving) return;
+    const t = setInterval(() => refreshSources(), transcribing ? 3000 : 5000);
     return () => clearInterval(t);
-  }, [transcribing, refreshSources]);
+  }, [transcribing, improving, refreshSources]);
 
   const checkedIds = useMemo(
     () => sources.filter((s) => s.checked && s.status === "ready").map((s) => s.id),

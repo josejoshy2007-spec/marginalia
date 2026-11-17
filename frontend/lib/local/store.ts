@@ -35,7 +35,7 @@ import {
   type Rec,
 } from "./gen";
 import { GeminiError, patiently, speak, streamGenerate } from "./gemini";
-import { embedPassages } from "./embedder";
+import { embedPassages, resetWorker } from "./embedder";
 import * as ib from "./ib";
 import { parseText, parseUrl, parsePdf, ParseError, transcribeRecording, transcribeYoutube, YOUTUBE_RE } from "./parse";
 import { citation, forgetSource, passageBlock, retrieve, selectPassages, summaryPassages, type Retrieved } from "./search";
@@ -94,7 +94,7 @@ function boot(): Promise<void> {
   booted ??= (async () => {
     requestPersistence();
     await resumeJobs();
-    if (typeof window !== "undefined") window.addEventListener("marginalia:library-changed", () => void reembedStale());
+    if (typeof window !== "undefined") window.addEventListener("marginalia:library-changed", () => (forgetStats(), void reembedStale()));
     void reembedStale();
   })();
   return booted;
@@ -147,6 +147,7 @@ async function sourceOut(s: SourceRow): Promise<Source> {
     stage: p?.stage ?? null,
     error: s.error ?? null,
     can_retry: canRetry,
+    ...(s.status === "ready" ? { search_progress: await searchProgress(s.id!) } : {}),
   };
 }
 
@@ -244,8 +245,77 @@ async function need<T>(p: Promise<T | undefined>, what = "Not found"): Promise<T
 // ---------------------------------------------------------------- sources
 
 const EMBED_BATCH = 16;
+const INSERT_BATCH = 400;
 
-/** (Re)build chunks + embeddings for a source, resuming after the chunks already stored. */
+/** Per source: how many chunks have no 384-d vector yet. Counting loads the vectors, so it is cached. */
+const searchStats = new Map<number, { total: number; bare: number }>();
+/** Bumped whenever a source's vectors change, so a count read before the change is never cached or trusted. */
+const statsVersion = new Map<number, number>();
+let statsEpoch = 0;
+const versionOf = (id: number) => `${statsEpoch}:${statsVersion.get(id) ?? 0}`;
+const bumpStats = (id: number) => statsVersion.set(id, (statsVersion.get(id) ?? 0) + 1);
+function forgetStats(id?: number) {
+  if (id === undefined) {
+    searchStats.clear();
+    statsEpoch++;
+  } else {
+    searchStats.delete(id);
+    bumpStats(id);
+  }
+}
+/** Test seam: runs after searchProgress has read a source's chunks, before it stores the count. */
+const searchHooks: { afterRead?: (id: number) => Promise<void> } = {};
+/** Background vector filling gave up (no worker, or it timed out). While set, no search_progress is reported. */
+let searchFillPaused = false;
+let fillRetryMs = 60_000;
+let fillRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let fillRetried = false;
+
+async function searchProgress(id: number): Promise<number | undefined> {
+  if (searchFillPaused) return undefined; // nothing is improving it: don't show a label that polling would chase forever
+  let st = searchStats.get(id);
+  for (let attempt = 0; !st; attempt++) {
+    const v = versionOf(id);
+    const chunks = await db.chunks.where("source_id").equals(id).toArray();
+    const fresh = { total: chunks.length, bare: chunks.filter((c) => c.embedding?.length !== EMBED_DIM).length };
+    await searchHooks.afterRead?.(id);
+    if (v === versionOf(id)) {
+      searchStats.set(id, fresh);
+      st = fresh;
+    } else if (attempt >= 2) {
+      st = fresh; // keeps changing: report what we have, uncached
+      break;
+    }
+  }
+  if (searchFillPaused || !st.total || !st.bare) return undefined;
+  return Math.round(((st.total - st.bare) / st.total) * 1000) / 1000;
+}
+
+/** The fill stopped on a worker failure: hide progress, and try once more (fresh worker) after a minute. */
+function pauseSearchFill() {
+  searchFillPaused = true;
+  if (fillRetried || fillRetryTimer) return;
+  fillRetried = true;
+  fillRetryTimer = setTimeout(() => {
+    fillRetryTimer = null;
+    resetWorker();
+    void reembedStale(); // stays paused until a batch succeeds (see fillBatchWorked)
+  }, fillRetryMs);
+  (fillRetryTimer as { unref?: () => void }).unref?.();
+}
+
+/** A batch was embedded: a later failure gets its own retry, and a paused fill resumes (one-shot) so the UI refreshes at once. */
+function fillBatchWorked() {
+  fillRetried = false;
+  if (!searchFillPaused) return;
+  searchFillPaused = false;
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("marginalia:search-resumed"));
+}
+
+/**
+ * (Re)build the chunks for a source, resuming after the chunks already stored. Chunks are stored WITHOUT
+ * vectors (keyword search works at once); reembedStale() fills the vectors in the background afterwards.
+ */
 async function indexSource(src: SourceRow, report: (f: number, stage: string) => void) {
   const spans = chunkText(src.text, 800, 120, src.pages);
   let done = await db.chunks.where("source_id").equals(src.id!).count();
@@ -253,20 +323,12 @@ async function indexSource(src: SourceRow, report: (f: number, stage: string) =>
     await db.chunks.where("source_id").equals(src.id!).delete();
     done = 0;
   }
-  for (let i = done; i < spans.length; i += EMBED_BATCH) {
-    const batch = spans.slice(i, i + EMBED_BATCH);
-    report(i / spans.length, `Indexing for search (${i}/${spans.length})`);
-    let vecs: Float32Array[];
-    try {
-      vecs = await embedPassages(batch.map((c) => c.text)); // on the device: no API calls
-    } catch {
-      // The model can't load (low memory, missing files): keep the chunks without vectors. Search uses
-      // keywords for them and reembedStale() fills the vectors in on a later start.
-      vecs = batch.map(() => new Float32Array(0));
-    }
+  for (let i = done; i < spans.length; i += INSERT_BATCH) {
+    const batch = spans.slice(i, i + INSERT_BATCH);
+    report(i / spans.length, `Saving passages (${i}/${spans.length})`);
     if (!(await db.sources.get(src.id!))) return; // deleted meanwhile
     await db.chunks.bulkAdd(
-      batch.map((c, j) => ({
+      batch.map((c) => ({
         source_id: src.id!,
         subject_id: src.subject_id,
         ord: c.ord,
@@ -276,11 +338,12 @@ async function indexSource(src: SourceRow, report: (f: number, stage: string) =>
         page_start: c.page_start,
         page_end: c.page_end,
         token_count: c.token_count,
-        embedding: vecs[j],
+        embedding: new Float32Array(0),
       })),
     );
   }
   forgetSource(src.id!);
+  forgetStats(src.id!);
 }
 
 /**
@@ -292,13 +355,17 @@ let reembedding: Promise<void> | null = null;
 let reembedAgain = false;
 function reembedStale(): Promise<void> {
   if (reembedding) {
-    reembedAgain = true;
+    reembedAgain = true; // a newer source may have appeared: the running pass re-checks after its current batch
     return reembedding;
   }
   reembedding = (async () => {
     do {
       reembedAgain = false;
-      for (const s of await db.sources.where("status").equals("ready").toArray()) {
+      forgetStats();
+      let restart = false;
+      // Newest first, so a source just added gets its vectors before the old library.
+      const ready = (await db.sources.where("status").equals("ready").toArray()).sort((a, b) => b.id! - a.id!);
+      for (const s of ready) {
         if (sourceProgress.has(s.id!)) continue;
         const stale = (await db.chunks.where("source_id").equals(s.id!).sortBy("ord")).filter((c) => c.embedding?.length !== EMBED_DIM);
         for (let i = 0; i < stale.length; i += EMBED_BATCH) {
@@ -307,13 +374,23 @@ function reembedStale(): Promise<void> {
           try {
             vecs = await embedPassages(batch.map((c) => c.text), { allowMain: false });
           } catch {
-            return; // the worker/model isn't available (yet): keyword search keeps working; try again next start
+            pauseSearchFill(); // the worker/model isn't available: keyword search keeps working; no progress label
+            return;
           }
+          fillBatchWorked(); // it works again
           await new Promise((r) => setTimeout(r, 0)); // let the UI breathe between batches
           if (!(await db.sources.get(s.id!))) break; // deleted meanwhile
           await db.transaction("rw", db.chunks, () => Promise.all(batch.map((c, j) => db.chunks.update(c.id!, { embedding: vecs[j] }))));
           forgetSource(s.id!);
+          bumpStats(s.id!);
+          const st = searchStats.get(s.id!);
+          if (st) st.bare = Math.max(0, st.bare - batch.length);
+          if (reembedAgain) {
+            restart = true; // something changed (a new source): re-plan, newest first
+            break;
+          }
         }
+        if (restart) break;
       }
     } while (reembedAgain);
   })().finally(() => (reembedding = null));
@@ -356,6 +433,7 @@ function submitSource(id: number) {
     } finally {
       sourceProgress.delete(id);
     }
+    void reembedStale(); // fill in the vectors in the background, newest source first
   };
   db.sources.get(id).then((s) => ((s?.kind === "audio" ? mediaQueue : docsQueue).push(run)));
 }
@@ -414,6 +492,7 @@ async function deleteSourceRows(id: number) {
   await db.blobs.delete(uploadKey(id));
   await db.sources.delete(id);
   forgetSource(id);
+  forgetStats(id);
 }
 
 // ---------------------------------------------------------------- generation
@@ -1037,6 +1116,18 @@ export const localApi = {
 
   /** Re-embed chunks that still have an older vector, on the device. Resolves when done. */
   reembedStale,
+  /** Test seams for the search-progress race and worker-failure handling. */
+  _search: {
+    hooks: searchHooks,
+    setRetryMs: (ms: number) => (fillRetryMs = ms),
+    paused: () => searchFillPaused,
+    resume: () => {
+      searchFillPaused = false;
+      fillRetried = false;
+      if (fillRetryTimer) clearTimeout(fillRetryTimer);
+      fillRetryTimer = null;
+    },
+  },
   /** Settle or restart interrupted jobs (also a test seam). */
   resumeJobs,
   exportBackup: () => exportAll(),

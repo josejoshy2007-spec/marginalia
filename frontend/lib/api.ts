@@ -31,6 +31,8 @@ export type Source = {
   stage?: string | null;
   error?: string | null;
   can_retry?: boolean;
+  /** Share (0-1) of chunks with on-device vectors; absent when complete (local engine only). */
+  search_progress?: number;
 };
 
 export type PageSpan = { page: number; start: number; end: number };

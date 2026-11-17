@@ -54,72 +54,23 @@ function load(): Promise<Extractor> {
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
 /**
- * bge-small reads at most 512 tokens, but chunks run ~800 cl100k tokens (~1,000 wordpieces). A passage is
- * therefore split into overlapping windows of ~1,800 characters (about 400-450 wordpieces for English, so
- * nothing is truncated), each embedded on its own, and the passage vector is the normalised mean.
+ * bge-small reads at most 512 tokens (the tokenizer truncates), and on the WASM backend each ~1,800
+ * characters costs about 1.5 s. A passage is therefore embedded from its first PASSAGE_CHARS characters
+ * only, as one window: no windowing and no averaging.
  */
-export const WINDOW_CHARS = 1800;
-const WINDOW_STEP = 1600; // 200 characters of overlap
+export const PASSAGE_CHARS = 2000;
+export const passageText = (t: string) => t.slice(0, PASSAGE_CHARS);
 
-export function windows(text: string): string[] {
-  if (text.length <= WINDOW_CHARS) return [text];
-  const out: string[] = [];
-  for (let start = 0; ; start += WINDOW_STEP) {
-    let end = start + WINDOW_CHARS;
-    if (end >= text.length) {
-      end = text.length;
-      out.push(text.slice(Math.max(0, end - WINDOW_CHARS), end)); // the last window ends exactly at the end
-      break;
-    }
-    out.push(text.slice(start, end));
-  }
-  return out;
-}
-
-function meanUnit(vs: Float32Array[]): Float32Array {
-  if (vs.length === 1) return vs[0];
-  const m = new Float32Array(vs[0].length);
-  for (const v of vs) for (let k = 0; k < m.length; k++) m[k] += v[k];
-  let n = 0;
-  for (let k = 0; k < m.length; k++) n += m[k] * m[k];
-  n = Math.sqrt(n) || 1;
-  for (let k = 0; k < m.length; k++) m[k] /= n;
-  return m;
-}
-
-async function embedWindows(run: Extractor, texts: string[]): Promise<Float32Array[]> {
-  const flat: string[] = [];
-  const owner: number[] = [];
-  texts.forEach((t, i) => {
-    for (const w of windows(t)) {
-      flat.push(w);
-      owner.push(i);
-    }
-  });
-  const vecs: Float32Array[] = [];
-  for (let i = 0; i < flat.length; i += BATCH) {
-    const batch = flat.slice(i, i + BATCH);
-    const res = await run(batch, { pooling: "cls", normalize: true });
-    const dim = res.dims[res.dims.length - 1];
-    for (let j = 0; j < batch.length; j++) vecs.push(Float32Array.from(res.data.subarray(j * dim, (j + 1) * dim)));
-    await tick();
-  }
-  const groups: Float32Array[][] = texts.map(() => []);
-  vecs.forEach((v, k) => groups[owner[k]].push(v));
-  return groups.map(meanUnit);
-}
-
-/** Unit-length 384-d vectors. Queries get BGE's search prefix (one window); passages are windowed and averaged. */
+/** Unit-length 384-d vectors. Queries get BGE's search prefix; passages use their first PASSAGE_CHARS characters. */
 export async function embedLocal(texts: string[], kind: "query" | "passage"): Promise<Float32Array[]> {
   const run = await load().catch((e) => {
     const err = new Error(e instanceof Error ? e.message : String(e));
     err.name = "ModelLoadError"; // lets the worker tell its owner to retry on the main thread
     throw err;
   });
-  if (kind === "passage") return embedWindows(run, texts);
   const out: Float32Array[] = [];
   for (let i = 0; i < texts.length; i += BATCH) {
-    const batch = texts.slice(i, i + BATCH).map((t) => (kind === "query" ? QUERY_PREFIX + t : t));
+    const batch = texts.slice(i, i + BATCH).map((t) => (kind === "query" ? QUERY_PREFIX + t : passageText(t)));
     const res = await run(batch, { pooling: "cls", normalize: true });
     const dim = res.dims[res.dims.length - 1];
     for (let j = 0; j < batch.length; j++) out.push(Float32Array.from(res.data.subarray(j * dim, (j + 1) * dim)));

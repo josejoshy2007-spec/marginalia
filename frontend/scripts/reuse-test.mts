@@ -199,11 +199,118 @@ ok("255k-token summary input: 2 parts + 1 combine = 3 requests");
   const hits = await retrieve(subject.id, [c.id], "alleles segregate meiosis", 3);
   assert.ok(hits.length > 0, "keyword fallback finds the empty-vector chunks");
   ok("embedder failure: source still ends ready with empty vectors; keyword search works");
+  localApi._search.resume(); // the failed fill paused progress reporting; a later start clears it
   setEmbedder(async (texts) => texts.map(() => new Float32Array(384).fill(1 / Math.sqrt(384))));
   await localApi.reembedStale();
   const after = await db.chunks.where("source_id").equals(c.id).toArray();
   assert.ok(after.every((x) => x.embedding.length === 384), "reembedStale fills empty vectors");
   ok("reembedStale treats empty vectors as stale and fills them in");
+}
+
+// 1b. Instant ready: a new source is ready without the embedder; vectors are filled in later, newest source first.
+{
+  await localApi.reembedStale(); // settle anything pending from earlier tests
+  let embedCalls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r)); // holds the embedder shut, so "ready" is proven independent of it
+  const order: string[] = [];
+  setEmbedder(async (texts) => {
+    embedCalls++;
+    for (const t of texts) order.push(t.slice(0, 5));
+    await gate;
+    return texts.map(() => new Float32Array(384).fill(1 / Math.sqrt(384)));
+  });
+  // An older ready source with no vectors, then a newer one added through the normal path.
+  const oldText = "Zebra stripes camouflage herds on the savanna. ".repeat(40);
+  const olderId = await db.sources.add({ subject_id: subject.id, kind: "text", title: "Old", url: null, text: oldText, pages: [], checked: true, status: "ready", error: null, created_at: stamp0() } as any);
+  await db.chunks.add({ source_id: olderId, subject_id: subject.id, ord: 0, text: "Zebra stripes camouflage.", char_start: 0, char_end: 25, page_start: null, page_end: null, token_count: 5, embedding: new Float32Array(0) } as any);
+  const n = await localApi.addText(subject.id, "Newer", "Quark confinement binds particles inside hadrons. ".repeat(40));
+  await settle(n.id);
+  assert.equal((await db.sources.get(n.id))!.status, "ready", "ready while the embedder is still blocked");
+  const bare = await db.chunks.where("source_id").equals(n.id).toArray();
+  assert.ok(bare.length > 0 && bare.every((x) => x.embedding.length === 0));
+  const before = (await localApi.sources(subject.id)).find((x) => x.id === n.id)!;
+  assert.equal(before.search_progress, 0, "search_progress starts at 0");
+  ok("new source is ready while the embedder is blocked; search_progress starts at 0");
+  release();
+  await localApi.reembedStale();
+  assert.ok(embedCalls > 0);
+  const filled = await db.chunks.where("source_id").equals(n.id).toArray();
+  assert.ok(filled.every((x) => x.embedding.length === 384), "vectors filled in");
+  assert.ok((await db.chunks.where("source_id").equals(olderId).toArray()).every((x) => x.embedding.length === 384));
+  assert.equal(order[0], "Quark".slice(0, 5), "newest source is embedded first");
+  const after = (await localApi.sources(subject.id)).find((x) => x.id === n.id)!;
+  assert.ok(after.search_progress === undefined || after.search_progress === 1, "search_progress reaches 1 (omitted)");
+  ok("reembedStale fills vectors newest source first; search_progress goes 0 to complete");
+  const k = (await answerKey(subject.id, subj0(), { message: "q", source_ids: [n.id] }, [n.id]));
+  assert.ok(k.includes(`:0]`) || k.includes(":0\""), "answer key records no bare chunks once filled");
+  ok("answerKey reflects vectors being filled in");
+}
+// 1c. Progress race: a batch landing while searchProgress is reading must not leave progress stuck below 100%.
+{
+  await localApi.reembedStale();
+  setEmbedder(async (texts) => texts.map(() => new Float32Array(384).fill(1 / Math.sqrt(384))));
+  const sid = await db.sources.add({ subject_id: subject.id, kind: "text", title: "Race", url: null, text: "Race text. ".repeat(30), pages: [], checked: true, status: "ready", error: null, created_at: stamp0() } as any);
+  for (let o = 0; o < 3; o++) await db.chunks.add({ source_id: sid, subject_id: subject.id, ord: o, text: `Race chunk ${o}`, char_start: 0, char_end: 5, page_start: null, page_end: null, token_count: 3, embedding: new Float32Array(0) } as any);
+  let fired = 0;
+  localApi._search.hooks.afterRead = async (id) => {
+    if (id === sid && fired++ === 0) await localApi.reembedStale(); // the whole fill lands during this source's first read
+  };
+  const mid = (await localApi.sources(subject.id)).find((x) => x.id === sid)!;
+  localApi._search.hooks.afterRead = undefined;
+  assert.ok(fired >= 1);
+  assert.ok(mid.search_progress === undefined, `progress must not stick below complete (got ${mid.search_progress})`);
+  const later = (await localApi.sources(subject.id)).find((x) => x.id === sid)!;
+  assert.ok(later.search_progress === undefined, "cached count is not stale");
+  ok("progress race: a batch landing during the read is not lost; progress ends complete");
+}
+
+// 1d. Worker failure: the fill stops, search_progress is omitted (so the label and polling stop), and one retry resumes it.
+{
+  setEmbedder(null);
+  const { configureEmbedderForTests } = await import("../lib/local/embedder");
+  configureEmbedderForTests(); // no worker available in Node: embedPassages(allowMain:false) throws
+  const sid = await db.sources.add({ subject_id: subject.id, kind: "text", title: "NoWorker", url: null, text: "No worker. ".repeat(30), pages: [], checked: true, status: "ready", error: null, created_at: stamp0() } as any);
+  await db.chunks.add({ source_id: sid, subject_id: subject.id, ord: 0, text: "No worker chunk", char_start: 0, char_end: 5, page_start: null, page_end: null, token_count: 3, embedding: new Float32Array(0) } as any);
+  localApi._search.setRetryMs(30);
+  await localApi.reembedStale();
+  assert.ok(localApi._search.paused());
+  const out = (await localApi.sources(subject.id)).find((x) => x.id === sid)!;
+  assert.equal(out.search_progress, undefined, "search_progress omitted while paused");
+  assert.equal(out.status, "ready");
+  // the single retry: the worker is still unavailable, so it pauses again and does not loop
+  await new Promise((r) => setTimeout(r, 150));
+  assert.ok(localApi._search.paused(), "stays paused after the one retry fails");
+  assert.equal((await localApi.sources(subject.id)).find((x) => x.id === sid)!.search_progress, undefined);
+  localApi._search.setRetryMs(60_000);
+  // A later fill that works un-pauses at its first batch (not at its end) and fires the resumed event once.
+  for (let o = 1; o < 20; o++) await db.chunks.add({ source_id: sid, subject_id: subject.id, ord: o, text: `No worker chunk ${o}`, char_start: 0, char_end: 5, page_start: null, page_end: null, token_count: 3, embedding: new Float32Array(0) } as any);
+  let batches = 0;
+  let release2!: () => void;
+  const gate2 = new Promise<void>((r) => (release2 = r));
+  setEmbedder(async (texts) => {
+    if (++batches > 1) await gate2; // first batch succeeds at once, the second waits
+    return texts.map(() => new Float32Array(384).fill(1 / Math.sqrt(384)));
+  });
+  let resumed = 0;
+  (globalThis as any).window = { dispatchEvent: (e: Event) => void (e.type === "marginalia:search-resumed" && resumed++) };
+  let filled = false;
+  const fill = localApi.reembedStale().then(() => void (filled = true));
+  for (let i = 0; i < 100 && !resumed; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(resumed, 1, "resumed event fires after the first successful batch");
+  assert.ok(!localApi._search.paused(), "paused cleared by the first successful batch");
+  assert.ok(!filled, "the fill is still running when it fires");
+  release2();
+  await fill;
+  assert.equal(resumed, 1, "one-shot: not fired again when the fill completes");
+  delete (globalThis as any).window;
+  ok("worker failure: search_progress omitted, one retry, resumed fires at the first good batch");
+}
+function stamp0() {
+  return new Date().toISOString();
+}
+function subj0() {
+  return undefined;
 }
 
 // 4. Boot / resume.
