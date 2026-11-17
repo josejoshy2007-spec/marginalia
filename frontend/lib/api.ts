@@ -335,6 +335,8 @@ export type ChatPayload = {
   history?: { role: "user" | "assistant"; content: string }[];
   /** "general": Ask AI's "Ask anything" (no sources, no citations). Default: from the checked sources. */
   mode?: "sources" | "general";
+  /** Skip the saved-answer replay (a retry after an error must ask the AI again). */
+  fresh?: boolean;
 };
 
 /** Ask a question and invoke `onEvent` for each event (sources, text, cite, error, done) as it arrives. */

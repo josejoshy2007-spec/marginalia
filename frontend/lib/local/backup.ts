@@ -6,7 +6,6 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { db, now, type ArtifactRow, type Citation, type SourceRow } from "./db";
-import { EMBED_DIM } from "./settings";
 
 export const BACKUP_VERSION = 1;
 
@@ -77,7 +76,9 @@ export async function importAll(file: Blob): Promise<ImportResult> {
       const subject = subjectIds.get(s.subject_id);
       if (subject == null || !s.text) continue; // failed/unfinished sources have nothing to keep
       const chunks = (chunksBySource.get(s.id) ?? []).filter((c) => typeof c.embedding === "string");
-      const usable = chunks.length > 0 && b64ToF32(chunks[0].embedding).length === EMBED_DIM;
+      // Any stored vector keeps the chunks (other-size ones are re-embedded on the device afterwards);
+      // sources without vectors are re-indexed from their text, also on the device.
+      const usable = chunks.length > 0 && b64ToF32(chunks[0].embedding).length > 0;
       const row: SourceRow = {
         subject_id: subject, kind: s.kind, title: s.title, url: s.url ?? null, text: s.text, pages: s.pages ?? [],
         checked: s.checked ?? true, status: usable ? "ready" : "processing", error: null, created_at: s.created_at ?? now(),

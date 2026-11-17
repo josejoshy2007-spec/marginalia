@@ -370,7 +370,7 @@ async function readImage(file: Blob, name: string): Promise<ParsedDoc> {
       "or tables, add a short [Diagram: …] / [Table: …] description of what they show (tables as 'a | b | c' rows). " +
       "Do not add facts that aren't in the image. `title` is a short topic title.",
     IMAGE_SCHEMA,
-    { parts: [{ inlineData: { mimeType: mime, data: await blobToBase64(file) } }] },
+    { parts: [{ inlineData: { mimeType: mime, data: await blobToBase64(file) } }], tag: "image" },
   );
   const text = normalize(out.text ?? "");
   if (!text) throw new GeminiError("Couldn't find any text in that photo. Try a sharper, well-lit photo.");

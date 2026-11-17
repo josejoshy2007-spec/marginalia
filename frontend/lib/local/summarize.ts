@@ -3,6 +3,10 @@
  * summarize.py). Passages are numbered globally so [n] citations survive the combining pass.
  */
 import { GeminiError, generateJson, patiently } from "./gemini";
+
+/** Pause between map batches so ~180k-token requests stay under the free tier's tokens-per-minute limit. */
+export const mapGap = { ms: 60_000 };
+const wait = (ms: number) => (ms > 0 ? new Promise<void>((r) => setTimeout(r, ms)) : Promise.resolve());
 import { SHEET_SCHEMA, STYLE, focusLine, type Rec } from "./gen";
 import { passageBlock, type Retrieved } from "./search";
 
@@ -15,23 +19,33 @@ export const SUMMARY_FORMATS: Record<string, [string, string]> = {
 const LENGTHS: Record<string, number> = { brief: 300, standard: 800, detailed: 2000 };
 export const SUMMARY_LENGTH: Record<string, string> = { short: "brief", medium: "standard", long: "detailed" };
 
-const MAP_BATCH_TOKENS = 40_000;
-const SINGLE_PASS_TOKENS = 60_000;
+const MAP_BATCH_TOKENS = 180_000;
+const SINGLE_PASS_TOKENS = 200_000;
 
 type Numbered = [number, Retrieved][];
+
+const CJK = /[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]/g;
+/** Token estimate for a text: CJK characters (Han, Kana, Hangul) count 1 each, everything else chars/4. */
+export function estimateTokens(text: string): number {
+  const cjk = text.match(CJK)?.length ?? 0;
+  return cjk + Math.ceil((text.length - cjk) / 4);
+}
+/** The larger of the stored count (chars/4 proxy) and the CJK-aware estimate, so CJK books are not underestimated. */
+export const chunkTokens = (r: Retrieved) => Math.max(r.chunk.token_count, estimateTokens(r.chunk.text));
+const numberedTokens = (b: Numbered) => b.reduce((n, [, r]) => n + chunkTokens(r), 0);
 
 function batches(ps: Retrieved[]): Numbered[] {
   const out: Numbered[] = [];
   let cur: Numbered = [];
   let size = 0;
   ps.forEach((r, i) => {
-    if (cur.length && size + r.chunk.token_count > MAP_BATCH_TOKENS) {
+    if (cur.length && size + chunkTokens(r) > MAP_BATCH_TOKENS) {
       out.push(cur);
       cur = [];
       size = 0;
     }
     cur.push([i + 1, r]);
-    size += r.chunk.token_count;
+    size += chunkTokens(r);
   });
   if (cur.length) out.push(cur);
   return out;
@@ -50,7 +64,7 @@ export async function buildSummary(
   const [label, what] = SUMMARY_FORMATS[fmt];
   const words = LENGTHS[length] ?? LENGTHS.standard;
   const system = "You summarise study material faithfully and clearly. " + STYLE;
-  const total = ps.reduce((s, r) => s + r.chunk.token_count, 0);
+  const total = ps.reduce((s, r) => s + chunkTokens(r), 0);
   const fl = focusLine(focus);
 
   if (total <= SINGLE_PASS_TOKENS) {
@@ -62,7 +76,7 @@ export async function buildSummary(
         "claims they support. Put the whole summary in `body` (Markdown); `title` names the material." +
         fl,
       SHEET_SCHEMA,
-      { ctx },
+      { ctx, tag: "summary", inputTokens: total },
     );
     return finish(out, label, 1);
   }
@@ -70,9 +84,14 @@ export async function buildSummary(
   const groups = batches(ps);
   const notes: string[] = [];
   for (let i = 1; i <= groups.length; i++) {
+    if (i > 1) {
+      onProgress((i - 1) / (groups.length + 1), "Pausing so the free token limit can reset");
+      await wait(mapGap.ms);
+    }
     onProgress((i - 1) / (groups.length + 1), `Reading part ${i} of ${groups.length}`);
     const partWords = Math.max(250, Math.floor((words * 2.5) / groups.length));
-    // Big books send ~40k tokens per request; wait out per-minute token limits instead of failing.
+    // Big books send ~180k tokens per request; wait out per-minute token limits instead of failing.
+    const partTokens = numberedTokens(groups[i - 1]);
     const out = await patiently(() =>
       generateJson<Rec>(
         system,
@@ -82,8 +101,11 @@ export async function buildSummary(
           "shown. Put the notes in `body`; `title` names this part's topic." +
           fl,
         SHEET_SCHEMA,
-        { ctx },
+        { ctx, tag: "summary", inputTokens: partTokens },
       ),
+      2,
+      undefined,
+      partTokens,
     );
     notes.push(`### Part ${i}: ${out.title || ""}\n${(out.body || "").trim()}`);
   }
@@ -98,7 +120,7 @@ export async function buildSummary(
         "`body` (Markdown); `title` names the material." +
         fl,
       SHEET_SCHEMA,
-      { ctx },
+      { ctx, tag: "summary" },
     ),
   );
   return finish(out, label, groups.length);

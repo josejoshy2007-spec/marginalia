@@ -4,8 +4,9 @@
  */
 import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
-import { saveSettings } from "../lib/local/settings";
-import { generateJson, streamGenerate, GeminiError } from "../lib/local/gemini";
+import { getSettings, saveSettings } from "../lib/local/settings";
+import { clearExhausted, getUsage, resetUsage } from "../lib/local/usage";
+import { generateJson, streamGenerate, uploadFile, GeminiError } from "../lib/local/gemini";
 import { fitSchema, parseJsonReply, toMessages } from "../lib/local/cerebras";
 
 type Reply = { status: number; body?: unknown; sse?: string[] };
@@ -47,6 +48,9 @@ const SCHEMA = {
 let passed = 0;
 const check = async (label: string, fn: () => Promise<void> | void) => {
   calls = [];
+  await clearExhausted();
+  await resetUsage();
+  await saveSettings({ dailyBudget: 750 });
   await fn();
   passed++;
   console.log(`✓ ${label}`);
@@ -89,13 +93,13 @@ await check("with a Cerebras key, it answers before the extra models, and missin
 });
 
 await check("if Cerebras fails too, the extra Gemini models still get a go", async () => {
-  script = (w) => (w.startsWith("cerebras") ? { status: 400, body: { message: "context too long" } } : w === "gemini:lite" ? { status: 200, body: gem({ title: "L", cards: [] }) } : { status: 429, body: DAILY });
+  script = (w) => (w.startsWith("cerebras") ? { status: 400, body: { message: "context too long" } } : w === "gemini:lite" ? { status: 200, body: gem({ title: "L", cards: [] }) } : w === "gemini:gone" ? { status: 404, body: { error: { message: "nf" } } } : { status: 429, body: DAILY });
   assert.equal((await generateJson<any>("sys", "p", SCHEMA)).title, "L");
   assert.ok(calls.includes("cerebras:gpt-oss-120b") && calls.at(-1) === "gemini:lite");
 });
 
 await check("marking (geminiOnly) and photos never go to Cerebras", async () => {
-  script = (w) => (w === "gemini:lite" ? { status: 200, body: gem({ title: "L", cards: [] }) } : { status: 429, body: DAILY });
+  script = (w) => (w === "gemini:lite" ? { status: 200, body: gem({ title: "L", cards: [] }) } : w === "gemini:gone" ? { status: 404, body: { error: { message: "nf" } } } : { status: 429, body: DAILY });
   await generateJson("sys", "p", SCHEMA, { geminiOnly: true });
   await generateJson("sys", "p", SCHEMA, { parts: [{ inlineData: { mimeType: "image/jpeg", data: "x" } }] });
   assert.ok(!calls.some((c) => c.startsWith("cerebras")), calls.join(","));
@@ -136,6 +140,116 @@ await check("Gemini bodies become OpenAI messages (model → assistant, system f
 await check("JSON replies with chatter around them still parse; numbers and booleans are coerced", () => {
   assert.deepEqual(parseJsonReply('Here you go: {"a": 1} hope that helps'), { a: 1 });
   assert.deepEqual(fitSchema({ type: "OBJECT", properties: { n: { type: "INTEGER" }, ok: { type: "BOOLEAN" } } }, { n: "4.6", ok: "true" }), { n: 5, ok: true });
+});
+
+
+// ---- retry storms, exhausted-model memory, per-call cap, daily budget, usage meter ----
+
+const OK = { status: 200, body: gem({ title: "A", cards: [] }) };
+
+await check("a model with a spent daily quota is skipped on the next call (zero requests to it)", async () => {
+  await saveSettings({ cerebrasKey: "", cerebrasModel: "" });
+  script = (w) => (w === "gemini:lite" ? OK : w === "gemini:gone" ? { status: 404, body: { error: { message: "nf" } } } : { status: 429, body: DAILY });
+  await generateJson("sys", "p", SCHEMA);
+  assert.deepEqual(calls, ["gemini:main", "gemini:backup", "gemini:gone", "gemini:lite"]);
+  const ex = (await getSettings()).exhausted;
+  assert.deepEqual(Object.keys(ex).sort(), ["backup", "main"]);
+  const hours = (Date.parse(ex.main) - Date.now()) / 3_600_000;
+  assert.ok(hours > 0 && hours <= 25, `reset in ${hours}h`);
+  calls = [];
+  await generateJson("sys", "p", SCHEMA);
+  assert.deepEqual(calls, ["gemini:gone", "gemini:lite"]);
+});
+
+await check("when every model is exhausted, the call throws the daily error without any request", async () => {
+  await saveSettings({ extraModels: "lite" });
+  script = () => ({ status: 429, body: DAILY });
+  await assert.rejects(generateJson("sys", "p", SCHEMA), (e: unknown) => e instanceof GeminiError && e.quota === "day");
+  assert.deepEqual(calls, ["gemini:main", "gemini:backup", "gemini:lite"]);
+  calls = [];
+  await assert.rejects(generateJson("sys", "p", SCHEMA), (e: unknown) => e instanceof GeminiError && e.quota === "day" && e.fallthrough && /daily quota/.test(e.message));
+  assert.deepEqual(calls, []);
+  await saveSettings({ extraModels: "gone, lite" });
+});
+
+await check("a 503 storm makes at most 3 requests for one call", async () => {
+  script = () => ({ status: 503, body: { error: { message: "overloaded" } } });
+  await assert.rejects(generateJson("sys", "p", SCHEMA), /overloaded/);
+  assert.ok(calls.length <= 3 && calls.length >= 2, calls.join(","));
+});
+
+await check("a daily budget stops requests before they are sent, with the budget message", async () => {
+  await saveSettings({ dailyBudget: 2 });
+  script = () => OK;
+  await generateJson("sys", "p", SCHEMA);
+  await generateJson("sys", "p", SCHEMA);
+  assert.equal(calls.length, 2);
+  await assert.rejects(generateJson("sys", "p", SCHEMA), (e: unknown) => e instanceof GeminiError && e.quota === "day" && e.budget && /today's AI budget \(2 calls\)/.test(e.message));
+  assert.equal(calls.length, 2);
+  await saveSettings({ dailyBudget: 0 }); // 0 = no limit
+  await generateJson("sys", "p", SCHEMA);
+  assert.equal(calls.length, 3);
+});
+
+await check("every request is counted by feature tag (Cerebras separately)", async () => {
+  script = () => OK;
+  await generateJson("sys", "p", SCHEMA, { tag: "deck" });
+  await generateJson("sys", "p", SCHEMA, { tag: "quiz" });
+  await generateJson("sys", "p", SCHEMA, { tag: "quiz" });
+  let u = await getUsage();
+  assert.deepEqual(u.gemini, { deck: 1, quiz: 2 });
+  assert.equal(u.geminiTotal, 3);
+  await saveSettings({ cerebrasKey: "csk-test", cerebrasModel: "gpt-oss-120b" });
+  script = (w) => (w.startsWith("cerebras") ? { status: 200, body: { choices: [{ message: { content: '{"title":"C","cards":[]}' }, finish_reason: "stop" }] } } : { status: 429, body: DAILY });
+  await generateJson("sys", "p", SCHEMA, { tag: "sheet" });
+  u = await getUsage();
+  assert.deepEqual(u.cerebras, { sheet: 1 });
+  assert.equal(u.gemini.sheet, 2); // main + backup were tried
+});
+
+await check("daily budget spent: Cerebras still answers, no further Gemini model (extra models included) is tried", async () => {
+  await saveSettings({ dailyBudget: 1, cerebrasKey: "csk-test", cerebrasModel: "gpt-oss-120b" });
+  script = (w) => (w.startsWith("cerebras") ? { status: 200, body: { choices: [{ message: { content: '{"title":"C","cards":[]}' }, finish_reason: "stop" }] } } : { status: 429, body: DAILY });
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA)).title, "C");
+  assert.deepEqual(calls, ["gemini:main", "cerebras:gpt-oss-120b"]);
+});
+
+await check("daily budget spent with no Cerebras key: the budget message, and no request to any extra model", async () => {
+  await saveSettings({ dailyBudget: 1, cerebrasKey: "" });
+  script = () => ({ status: 429, body: DAILY });
+  await assert.rejects(generateJson("sys", "p", SCHEMA), (e: unknown) => e instanceof GeminiError && /AI budget/.test(e.message));
+  assert.deepEqual(calls, ["gemini:main"]);
+});
+
+await check("an input over ~60k tokens skips Cerebras (it can't hold it); a small one still uses it", async () => {
+  await saveSettings({ cerebrasKey: "csk-test", cerebrasModel: "gpt-oss-120b" });
+  script = (w) => (w === "gemini:lite" ? { status: 200, body: gem({ title: "L", cards: [] }) } : w === "gemini:gone" ? { status: 404, body: { error: { message: "nf" } } } : w.startsWith("cerebras") ? { status: 200, body: { choices: [{ message: { content: '{"title":"C","cards":[]}' }, finish_reason: "stop" }] } } : { status: 429, body: DAILY });
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA, { inputTokens: 150_000 })).title, "L");
+  assert.ok(!calls.some((c) => c.startsWith("cerebras")), calls.join(","));
+  calls = [];
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA, { inputTokens: 20_000 })).title, "C");
+  assert.ok(calls.some((c) => c.startsWith("cerebras")));
+});
+
+await check("uploading a 17 MB file counts one Gemini call (the start), not one per 8 MB piece", async () => {
+  const real = globalThis.fetch;
+  let posts = 0;
+  globalThis.fetch = (async (input: string | URL) => {
+    const url = String(input);
+    posts++;
+    if (url.includes("/upload/v1beta/files")) return new Response("{}", { status: 200, headers: { "x-goog-upload-url": "https://upload.example/session" } });
+    return new Response(JSON.stringify({ file: { name: "files/x", uri: "https://files/x", state: "ACTIVE" } }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const uri = await uploadFile(new Blob([new Uint8Array(17 * 1024 * 1024)]), "audio/mpeg", "lecture", undefined, { tag: "recording" });
+    assert.equal(uri, "https://files/x");
+  } finally {
+    globalThis.fetch = real;
+  }
+  assert.equal(posts, 4); // start + 3 pieces
+  const u = await getUsage();
+  assert.deepEqual(u.gemini, { recording: 1 });
+  assert.equal(u.geminiTotal, 1);
 });
 
 console.log(`\nALL ${passed} PROVIDER CHECKS PASSED`);

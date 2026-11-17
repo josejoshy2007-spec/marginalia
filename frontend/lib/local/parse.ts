@@ -154,7 +154,7 @@ export async function parseUrl(url: string, onProgress?: Progress): Promise<Pars
     `Read ${url} and return its main article text exactly as written (no summary, no commentary), as plain ` +
       "paragraphs separated by blank lines, with headings on their own lines. Skip menus, ads, cookie notices " +
       "and footers. The first line must be the page title.",
-    { tools: [{ url_context: {} }] },
+    { tools: [{ url_context: {} }], tag: "web" },
   );
   const [first, ...rest] = normalize(text).split("\n");
   const body = rest.join("\n").trim();
@@ -213,7 +213,7 @@ export async function transcribeRecording(blob: Blob, filename: string, onProgre
   if (known && duration > MAX_RECORDING_MIN * 60)
     throw new ParseError(`Recordings up to ${MAX_RECORDING_MIN / 60} hours are supported.`);
   const mime = geminiMime(blob, filename);
-  const uri = await uploadFile(blob, mime, filename, (f, stage) => onProgress?.(f * 0.3, stage));
+  const uri = await uploadFile(blob, mime, filename, (f, stage) => onProgress?.(f * 0.3, stage), { tag: "recording" });
   const windows = known ? Math.max(1, Math.ceil(duration / 60 / WINDOW_MIN)) : MAX_RECORDING_MIN / WINDOW_MIN;
   const paras: string[] = [];
   for (let w = 0; w < windows; w++) {
@@ -226,7 +226,7 @@ export async function transcribeRecording(blob: Blob, filename: string, onProgre
         `Transcribe only the part of this recording from ${mmss(from)} to ${mmss(to)}. Start each paragraph ` +
           "with its start time in brackets, like (12:05). Output only the transcript." +
           (known ? "" : ` If the recording ends before ${mmss(to)}, finish with the line ${END}. If there is no audio after ${mmss(from)}, output only ${END}.`),
-        { parts: [{ fileData: { fileUri: uri, mimeType: mime } }] },
+        { parts: [{ fileData: { fileUri: uri, mimeType: mime } }], tag: "recording" },
       ),
     );
     const clean = text.replace(END, "").trim();
@@ -249,7 +249,7 @@ export async function transcribeYoutube(url: string): Promise<ParsedDoc> {
     TRANSCRIBE_SYSTEM + " Add short '## Section' headings where the topic clearly shifts.",
     "Transcribe the spoken content of this video. `title` is the video's topic in a few words.",
     TRANSCRIPT_SCHEMA,
-    { parts: [{ fileData: { fileUri: url } }] },
+    { parts: [{ fileData: { fileUri: url } }], tag: "youtube" },
   );
   const text = (out.transcript ?? "").trim();
   if (!text) throw new GeminiError("Gemini couldn't hear any speech to transcribe.");

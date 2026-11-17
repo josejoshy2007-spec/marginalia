@@ -5,8 +5,9 @@
  * Google's RetryInfo delay, fallback to a second model when one is overloaded or its daily quota
  * is spent, and retries of dropped connections.
  */
-import { GEMINI_BASE, EMBED_DIM, getSettings, type Settings } from "./settings";
+import { GEMINI_BASE, getSettings, type Settings } from "./settings";
 import { cerebrasJson, cerebrasOpenStream, cerebrasStream } from "./cerebras";
+import { countCall, exhaustedModels, geminiToday, markExhausted } from "./usage";
 
 export class GeminiError extends Error {
   /** "minute": a per-minute quota (waiting a minute helps); "day": the daily quota is spent. */
@@ -15,6 +16,8 @@ export class GeminiError extends Error {
     public quota: "minute" | "day" | null = null,
     /** Out of quota, overloaded or unreachable: another model (or Cerebras) may still answer. */
     public fallthrough = false,
+    /** The student's own daily budget is spent: Cerebras may answer, but no further Gemini request. */
+    public budget = false,
   ) {
     super(message);
   }
@@ -24,19 +27,29 @@ export class GeminiError extends Error {
  * Run `fn`, and if it hits a per-minute quota wait a minute and try again (up to `tries` times).
  * For long background jobs (indexing a textbook, transcribing a lecture) where waiting beats failing.
  */
-export async function patiently<T>(fn: () => Promise<T>, tries = 6, onWait?: () => void): Promise<T> {
+/** A request this big can fail a per-minute token limit on its own; waiting a minute will not make it fit. */
+export const UNRETRYABLE_INPUT_TOKENS = 200_000;
+export async function patiently<T>(fn: () => Promise<T>, tries = 2, onWait?: () => void, inputTokens = 0): Promise<T> {
+  const max = Math.min(tries, 2); // never more than 2 retries (3 runs); each run is a whole routed chain
   for (let i = 0; ; i++) {
     try {
       return await fn();
     } catch (e) {
-      if (!(e instanceof GeminiError) || e.quota !== "minute" || i >= tries) throw e;
+      // A spent daily quota or daily budget won't clear in a minute: don't retry those.
+      if (!(e instanceof GeminiError) || e.quota !== "minute" || i >= max || inputTokens > UNRETRYABLE_INPUT_TOKENS) throw e;
       onWait?.();
       await sleep(62_000);
     }
   }
 }
 
-const RETRIES = 2;
+/** Attempts per model for 500/503/dropped connections, and HTTP requests allowed per logical call. */
+const MODEL_ATTEMPTS = 2;
+const CALL_CAP = 3; // generateJson / generateText / streamGenerate, all models together
+const BATCH_CAP = 2; // one embed batch, one speak
+const JSON_RETRIES = 1; // re-reads of a response body that dropped mid-way
+/** Cerebras' free context is far smaller than Gemini's: bigger inputs would only waste a call. */
+export const CEREBRAS_MAX_INPUT_TOKENS = 60_000;
 const RETRY_STATUSES = new Set([500, 503]);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -106,22 +119,49 @@ type SendOpts = {
   params?: Record<string, string>;
   pacer?: Pacer;
   signal?: AbortSignal;
+  /** Feature tag for the usage meter. */
+  tag?: string;
+  /** Requests still allowed for this logical call; shared by every send() of the call. */
+  cap?: { left: number };
 };
+
+const dailyGone = () =>
+  new GeminiError("Gemini's free daily quota is used up on every model the app tries. It resets at midnight Pacific time.", "day", true);
+
+/** Refuse (without sending) once today's Gemini requests reach the student's budget. */
+async function checkBudget(budget: number): Promise<void> {
+  if (budget > 0 && (await geminiToday()) >= budget)
+    throw new GeminiError(`You've used today's AI budget (${budget} calls). It resets at midnight, or raise it in Settings.`, "day", true, true);
+}
 
 /** POST with pacing, retries and model fallback. Returns an OK Response or throws GeminiError. */
 export async function send(o: SendOpts): Promise<Response> {
   const s = await getSettings();
   if (!s.geminiKey) throw new GeminiError("Add your free Gemini API key in Settings first (aistudio.google.com → Get API key).");
   const pacer = o.pacer ?? textPacer;
+  const cap = o.cap ?? { left: CALL_CAP };
+  const tag = o.tag ?? "other";
+  const gone = await exhaustedModels();
+  const models = o.models.filter((m) => !gone[m]);
+  if (!models.length) throw dailyGone();
+  if (cap.left <= 0) throw new GeminiError("Gemini kept failing, so the app stopped retrying. Try again in a moment.");
   let last: { status: number; body: unknown; raw: string } | null = null;
-  for (let mi = 0; mi < o.models.length; mi++) {
-    const model = o.models[mi];
+  let capped = false;
+  for (let mi = 0; mi < models.length && !capped; mi++) {
+    const model = models[mi];
     const url = new URL(o.endpoint ? `${GEMINI_BASE}/${o.endpoint}` : `${GEMINI_BASE}/models/${model}:${o.action}`);
     for (const [k, v] of Object.entries(o.params ?? {})) url.searchParams.set(k, v);
     const body = JSON.stringify(o.endpoint ? { ...o.body, model } : o.body);
     let res: Response | null = null;
-    for (let attempt = 0; attempt <= RETRIES; attempt++) {
+    for (let attempt = 0; attempt < MODEL_ATTEMPTS; attempt++) {
+      if (cap.left <= 0) {
+        capped = true;
+        break;
+      }
+      await checkBudget(s.dailyBudget);
       await pacer.acquire(pacer === textPacer ? s.rpm : 100, s.maxQuotaWait);
+      cap.left--;
+      await countCall("gemini", tag);
       try {
         res = await fetch(url, {
           method: "POST",
@@ -131,7 +171,7 @@ export async function send(o: SendOpts): Promise<Response> {
         });
       } catch (e) {
         if ((e as Error).name === "AbortError") throw e;
-        if (attempt === RETRIES) {
+        if (attempt === MODEL_ATTEMPTS - 1 || cap.left <= 0) {
           const code = ((e as { cause?: { code?: string } }).cause?.code ?? (e as Error).message ?? "").toString().slice(0, 60);
           throw new GeminiError(`Couldn't reach Gemini${code ? ` (${code})` : ""}. Check your internet connection and try again.`, null, true);
         }
@@ -145,22 +185,24 @@ export async function send(o: SendOpts): Promise<Response> {
         parsed = JSON.parse(raw);
       } catch {}
       last = { status: res.status, body: parsed, raw };
-      if (res.status === 429 && attempt < RETRIES) {
+      if (res.status === 404) cap.left++; // a retired model name in the list should not eat the call's allowance
+      if (res.status === 429) {
         const { delay, daily } = quotaInfo(parsed);
-        if (!daily && delay != null && delay <= s.maxQuotaWait) {
+        if (daily) await markExhausted(model);
+        if (!daily && attempt < MODEL_ATTEMPTS - 1 && delay != null && delay <= s.maxQuotaWait) {
           await sleep((delay + 0.5) * 1000);
           continue;
         }
         break;
       }
-      if (RETRY_STATUSES.has(res.status) && attempt < RETRIES) {
+      if (RETRY_STATUSES.has(res.status) && attempt < MODEL_ATTEMPTS - 1) {
         await sleep(2000 * (attempt + 1));
         continue;
       }
       break;
     }
     // Next model on overload or quota; also on 404 so a retired name in the list doesn't stop the chain.
-    if (last && (RETRY_STATUSES.has(last.status) || last.status === 429 || last.status === 404) && mi < o.models.length - 1) continue;
+    if (last && (RETRY_STATUSES.has(last.status) || last.status === 429 || last.status === 404) && mi < models.length - 1) continue;
     break;
   }
   if (!last) throw new GeminiError("Gemini request failed.");
@@ -185,6 +227,7 @@ export function liteModels(s: Settings): string[] {
  * Gemini models. If everything fails, the first Gemini error is reported (it says why).
  */
 export async function routed<T>(r: {
+  tag?: string;
   gemini: (models: string[]) => Promise<T>;
   cerebras?: (key: string, model: string) => Promise<T>;
 }): Promise<T> {
@@ -195,11 +238,13 @@ export async function routed<T>(r: {
     if (!(e instanceof GeminiError) || !e.fallthrough) throw e;
     if (r.cerebras && s.cerebrasKey && s.cerebrasModel) {
       try {
+        await countCall("cerebras", r.tag ?? "other");
         return await r.cerebras(s.cerebrasKey, s.cerebrasModel);
       } catch (ce) {
         if ((ce as Error).name === "AbortError") throw ce;
       }
     }
+    if (e.budget) throw e; // the budget covers every Gemini model: don't try the extra ones
     // Out for the day with no second AI set up: say how to keep going.
     const hinted =
       e.quota === "day" && r.cerebras && !s.cerebrasKey
@@ -236,7 +281,15 @@ export async function generateJson<T = Record<string, unknown>>(
   prompt: string,
   schema: Record<string, unknown>,
   /** geminiOnly: keep this on Gemini (exam marking, where the stronger model matters). */
-  opts: { parts?: Part[]; ctx?: string; signal?: AbortSignal; geminiOnly?: boolean } = {},
+  opts: {
+    parts?: Part[];
+    ctx?: string;
+    signal?: AbortSignal;
+    geminiOnly?: boolean;
+    tag?: string;
+    /** Estimated input size in tokens: above CEREBRAS_MAX_INPUT_TOKENS the request skips Cerebras (its context is too small). */
+    inputTokens?: number;
+  } = {},
 ): Promise<T> {
   const s = await getSettings();
   const body = {
@@ -244,14 +297,15 @@ export async function generateJson<T = Record<string, unknown>>(
     contents: [{ role: "user", parts: [...(opts.parts ?? []), { text: prompt }] }],
     generationConfig: { maxOutputTokens: s.maxTokens, responseMimeType: "application/json", responseSchema: schema },
   };
+  const cap = { left: CALL_CAP };
   const viaGemini = async (models: string[]): Promise<T> => {
     let data: Record<string, unknown> | null = null;
-    for (let attempt = 0; attempt <= RETRIES && !data; attempt++) {
-      const res = await send({ models, action: "generateContent", body, signal: opts.signal });
+    for (let attempt = 0; attempt <= JSON_RETRIES && !data; attempt++) {
+      const res = await send({ models, action: "generateContent", body, signal: opts.signal, tag: opts.tag, cap });
       try {
         data = await res.json();
       } catch {
-        if (attempt === RETRIES) throw new GeminiError("The connection to Gemini kept dropping. Try again in a moment.");
+        if (attempt === JSON_RETRIES) throw new GeminiError("The connection to Gemini kept dropping. Try again in a moment.");
         await sleep(2000 * (attempt + 1));
       }
     }
@@ -265,8 +319,9 @@ export async function generateJson<T = Record<string, unknown>>(
     }
   };
   // Photos and files need Gemini; so does anything the caller marks geminiOnly.
-  const textOnly = !opts.parts?.length && !opts.geminiOnly;
+  const textOnly = !opts.parts?.length && !opts.geminiOnly && !((opts.inputTokens ?? 0) > CEREBRAS_MAX_INPUT_TOKENS);
   return routed({
+    tag: opts.tag,
     gemini: viaGemini,
     cerebras: textOnly ? (key, model) => cerebrasJson<T>(key, model, body, schema, opts.signal) : undefined,
   });
@@ -276,7 +331,7 @@ export async function generateJson<T = Record<string, unknown>>(
 export async function generateText(
   system: string,
   prompt: string,
-  opts: { parts?: Part[]; tools?: Part[]; signal?: AbortSignal } = {},
+  opts: { parts?: Part[]; tools?: Part[]; signal?: AbortSignal; tag?: string } = {},
 ): Promise<{ text: string; finish: string | null }> {
   const s = await getSettings();
   const body: Record<string, unknown> = {
@@ -286,13 +341,14 @@ export async function generateText(
   };
   if (opts.tools) body.tools = opts.tools;
   const models = mainModels(s).concat(liteModels(s));
+  const cap = { left: CALL_CAP };
   for (let attempt = 0; ; attempt++) {
-    const res = await send({ models, action: "generateContent", body, signal: opts.signal });
+    const res = await send({ models, action: "generateContent", body, signal: opts.signal, tag: opts.tag, cap });
     try {
       return candidateText(await res.json());
     } catch (e) {
       if (e instanceof GeminiError) throw e;
-      if (attempt === RETRIES) throw new GeminiError("The connection to Gemini kept dropping. Try again in a moment.");
+      if (attempt === JSON_RETRIES) throw new GeminiError("The connection to Gemini kept dropping. Try again in a moment.");
       await sleep(2000 * (attempt + 1));
     }
   }
@@ -302,10 +358,13 @@ export async function generateText(
 export async function* streamGenerate(
   body: Record<string, unknown>,
   signal?: AbortSignal,
+  opts: { tag?: string } = {},
 ): AsyncGenerator<{ text?: string; finish?: string | null }> {
+  const cap = { left: CALL_CAP };
   const opened = await routed<{ res: Response; cerebras: boolean }>({
+    tag: opts.tag,
     gemini: (models) =>
-      send({ models, action: "streamGenerateContent", params: { alt: "sse" }, body, signal }).then((res) => ({ res, cerebras: false })),
+      send({ models, action: "streamGenerateContent", params: { alt: "sse" }, body, signal, tag: opts.tag, cap }).then((res) => ({ res, cerebras: false })),
     cerebras: (key, model) => cerebrasOpenStream(key, model, body, signal).then((res) => ({ res, cerebras: true })),
   });
   if (opened.cerebras) {
@@ -339,7 +398,13 @@ export async function* streamGenerate(
 }
 
 /** Embed texts for search. Batches of ≤100 per request; returns unit-length vectors. */
-export async function embed(texts: string[], task: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY"): Promise<Float32Array[]> {
+/** Gemini embeddings. No longer used for search or indexing (those run on the device); kept for reference. */
+const GEMINI_EMBED_DIM = 768;
+export async function embed(
+  texts: string[],
+  task: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY",
+  opts: { tag?: string } = {},
+): Promise<Float32Array[]> {
   const s = await getSettings();
   const out: Float32Array[] = [];
   for (let i = 0; i < texts.length; i += 100) {
@@ -348,12 +413,14 @@ export async function embed(texts: string[], task: "RETRIEVAL_DOCUMENT" | "RETRI
       models: [s.embedModel],
       action: "batchEmbedContents",
       pacer: embedPacer,
+      tag: opts.tag,
+      cap: { left: BATCH_CAP },
       body: {
         requests: batch.map((t) => ({
           model: `models/${s.embedModel}`,
           content: { parts: [{ text: t }] },
           taskType: task,
-          outputDimensionality: EMBED_DIM,
+          outputDimensionality: GEMINI_EMBED_DIM,
         })),
       },
     });
@@ -375,6 +442,7 @@ export async function speak(
   lines: { speaker: string; text: string }[],
   speakers: string[],
   voices: Record<string, string>,
+  opts: { tag?: string } = {},
 ): Promise<{ pcm: Uint8Array; rate: number }> {
   const s = await getSettings();
   const single = speakers.length === 1;
@@ -396,7 +464,7 @@ export async function speak(
         : { mode: "conversational", speakers: speakers.map((sp) => ({ speaker: sp, voice: voices[sp] ?? "Kore" })) },
     },
   };
-  const res = await send({ models: [s.ttsModel], endpoint: "interactions", body });
+  const res = await send({ models: [s.ttsModel], endpoint: "interactions", body, tag: opts.tag ?? "audio", cap: { left: BATCH_CAP } });
   const data = await res.json();
   const chunks: Uint8Array[] = [];
   let rate = 24000;
@@ -426,9 +494,13 @@ export async function uploadFile(
   mime: string,
   name: string,
   onProgress?: (f: number, stage: string) => void,
+  opts: { tag?: string } = {},
 ): Promise<string> {
   const s = await getSettings();
   if (!s.geminiKey) throw new GeminiError("Add your free Gemini API key in Settings first.");
+  const tag = opts.tag ?? "recording";
+  await checkBudget(s.dailyBudget);
+  await countCall("gemini", tag);
   const start = await fetch("https://generativelanguage.googleapis.com/upload/v1beta/files", {
     method: "POST",
     headers: {

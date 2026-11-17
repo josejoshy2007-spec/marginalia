@@ -11,7 +11,7 @@ type Props = {
   thread: Thread;
   active: boolean;
   onActivate: () => void;
-  onAsk: (t: Thread, message: string) => void;
+  onAsk: (t: Thread, message: string, fresh?: boolean) => void;
   onDiscard: (id: string) => void;
   onCite: (c: Citation) => void;
 };
@@ -78,7 +78,7 @@ export default function MarginThread({ thread, active, onActivate, onAsk, onDisc
                       <RetryLink
                         onRetry={() => {
                           const r = forRetry(thread);
-                          if (r) onAsk(r.trimmed, r.question);
+                          if (r) onAsk(r.trimmed, r.question, true);
                         }}
                       />
                     )}

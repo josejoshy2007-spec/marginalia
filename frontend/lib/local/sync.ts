@@ -19,7 +19,7 @@ import { db, now, syncState, SYNCED_TABLES, type SyncedTable, type TombstoneRow 
 import { googleDrive, type Drive, type DriveFile } from "./drive";
 import { AuthNeeded, driveToken } from "./google";
 import { forgetSource } from "./search";
-import { EMBED_DIM, getSettings, saveSettings } from "./settings";
+import { getSettings, saveSettings } from "./settings";
 import { localApi } from "./store";
 
 type Rec = Record<string, any> & { uid: string; updated_at: string };
@@ -193,7 +193,8 @@ export async function applyLibrary(lib: Library, local: Library, fetchContent: (
         res.missing.push(r.uid);
         continue;
       }
-      const usable = content.chunks.length > 0 && unb64(content.chunks[0].e).length === EMBED_DIM;
+      // Vectors from an older engine (e.g. 768-d Gemini) are kept for keyword fallback and re-embedded on the device.
+      const usable = content.chunks.length > 0 && unb64(content.chunks[0].e).length > 0;
       const id = await db.sources.add({ ...meta, text: content.text, pages: content.pages, status: usable ? "ready" : "processing", error: null });
       if (usable)
         await db.chunks.bulkAdd(

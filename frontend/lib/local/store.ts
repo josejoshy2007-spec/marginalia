@@ -34,11 +34,12 @@ import {
   SHEETS,
   type Rec,
 } from "./gen";
-import { embed, GeminiError, patiently, speak, streamGenerate } from "./gemini";
+import { GeminiError, patiently, speak, streamGenerate } from "./gemini";
+import { embedPassages } from "./embedder";
 import * as ib from "./ib";
 import { parseText, parseUrl, parsePdf, ParseError, transcribeRecording, transcribeYoutube, YOUTUBE_RE } from "./parse";
 import { citation, forgetSource, passageBlock, retrieve, selectPassages, summaryPassages, type Retrieved } from "./search";
-import { getSettings } from "./settings";
+import { EMBED_DIM, getSettings } from "./settings";
 import { preview, schedule, type Grade } from "./srs";
 import { buildSummary, SUMMARY_FORMATS, SUMMARY_LENGTH } from "./summarize";
 import { readAnswer, readQuestion, readQuizAnswers } from "./vision";
@@ -93,24 +94,30 @@ function boot(): Promise<void> {
   booted ??= (async () => {
     requestPersistence();
     await resumeJobs();
+    if (typeof window !== "undefined") window.addEventListener("marginalia:library-changed", () => void reembedStale());
+    void reembedStale();
   })();
   return booted;
 }
 
-/** Restart jobs for rows left "processing" (app closed mid-job, or an imported backup). */
+/**
+ * Rows left "processing" (app closed mid-job, or an imported backup). Work that is free (local parsing,
+ * local embeddings) resumes by itself. Anything that would spend Gemini calls the student did not ask for
+ * (transcribing a recording, reading a photo, re-running a generation) is marked failed with a Try again.
+ */
+const STOPPED = "Stopped when the app closed. Tap Try again.";
 async function resumeJobs() {
-  {
-    for (const s of await db.sources.where("status").equals("processing").toArray()) {
-      if (sourceProgress.has(s.id!)) continue;
-      const hasFile = !!(await db.blobs.get(uploadKey(s.id!)));
-      if (s.text || hasFile) submitSource(s.id!);
-      else await db.sources.update(s.id!, { status: "failed", error: "Interrupted. Please add it again." });
-    }
-    for (const a of await db.artifacts.where("status").equals("processing").toArray()) {
-      if (genProgress.has(a.id!)) continue;
-      if (a.subtype === "custom") await db.artifacts.update(a.id!, { status: "failed", error: "Interrupted." });
-      else startGeneration(a.id!).catch(async (e) => db.artifacts.update(a.id!, { status: "failed", error: message(e) }));
-    }
+  for (const s of await db.sources.where("status").equals("processing").toArray()) {
+    if (sourceProgress.has(s.id!)) continue;
+    const hasFile = !!(await db.blobs.get(uploadKey(s.id!)));
+    if (s.text) submitSource(s.id!); // text is already here: only local chunking and embedding is left
+    else if (hasFile && s.kind !== "audio" && s.kind !== "image") submitSource(s.id!); // local parse of a stored file
+    else if (hasFile) await db.sources.update(s.id!, { status: "failed", error: STOPPED }); // Try again re-runs Gemini on the stored upload
+    else await db.sources.update(s.id!, { status: "failed", error: "Interrupted. Please add it again." });
+  }
+  for (const a of await db.artifacts.where("status").equals("processing").toArray()) {
+    if (genProgress.has(a.id!)) continue;
+    await db.artifacts.update(a.id!, { status: "failed", error: a.subtype === "custom" ? "Interrupted." : STOPPED });
   }
 }
 
@@ -236,7 +243,7 @@ async function need<T>(p: Promise<T | undefined>, what = "Not found"): Promise<T
 
 // ---------------------------------------------------------------- sources
 
-const EMBED_BATCH = 100;
+const EMBED_BATCH = 16;
 
 /** (Re)build chunks + embeddings for a source, resuming after the chunks already stored. */
 async function indexSource(src: SourceRow, report: (f: number, stage: string) => void) {
@@ -249,11 +256,14 @@ async function indexSource(src: SourceRow, report: (f: number, stage: string) =>
   for (let i = done; i < spans.length; i += EMBED_BATCH) {
     const batch = spans.slice(i, i + EMBED_BATCH);
     report(i / spans.length, `Indexing for search (${i}/${spans.length})`);
-    const vecs = await patiently(
-      () => embed(batch.map((c) => c.text), "RETRIEVAL_DOCUMENT"),
-      10,
-      () => report(i / spans.length, "Waiting for Gemini's per-minute limit"),
-    );
+    let vecs: Float32Array[];
+    try {
+      vecs = await embedPassages(batch.map((c) => c.text)); // on the device: no API calls
+    } catch {
+      // The model can't load (low memory, missing files): keep the chunks without vectors. Search uses
+      // keywords for them and reembedStale() fills the vectors in on a later start.
+      vecs = batch.map(() => new Float32Array(0));
+    }
     if (!(await db.sources.get(src.id!))) return; // deleted meanwhile
     await db.chunks.bulkAdd(
       batch.map((c, j) => ({
@@ -271,6 +281,42 @@ async function indexSource(src: SourceRow, report: (f: number, stage: string) =>
     );
   }
   forgetSource(src.id!);
+}
+
+/**
+ * Sources indexed earlier (Gemini's 768-d vectors, or a backup/sync from elsewhere) are re-embedded
+ * on the device in the background. Vectors are replaced in place: the source keeps its "ready"
+ * status and every chunk keeps its text and offsets. Until a chunk is done, search uses keywords for it.
+ */
+let reembedding: Promise<void> | null = null;
+let reembedAgain = false;
+function reembedStale(): Promise<void> {
+  if (reembedding) {
+    reembedAgain = true;
+    return reembedding;
+  }
+  reembedding = (async () => {
+    do {
+      reembedAgain = false;
+      for (const s of await db.sources.where("status").equals("ready").toArray()) {
+        if (sourceProgress.has(s.id!)) continue;
+        const stale = (await db.chunks.where("source_id").equals(s.id!).sortBy("ord")).filter((c) => c.embedding?.length !== EMBED_DIM);
+        for (let i = 0; i < stale.length; i += EMBED_BATCH) {
+          const batch = stale.slice(i, i + EMBED_BATCH);
+          let vecs: Float32Array[];
+          try {
+            vecs = await embedPassages(batch.map((c) => c.text));
+          } catch {
+            return; // the model can't load (yet): keyword search keeps working; try again next start
+          }
+          if (!(await db.sources.get(s.id!))) break; // deleted meanwhile
+          await db.transaction("rw", db.chunks, () => Promise.all(batch.map((c, j) => db.chunks.update(c.id!, { embedding: vecs[j] }))));
+          forgetSource(s.id!);
+        }
+      }
+    } while (reembedAgain);
+  })().finally(() => (reembedding = null));
+  return reembedding;
 }
 
 function submitSource(id: number) {
@@ -529,21 +575,104 @@ class CiteParser {
   }
 }
 
+// ---- answer reuse: an identical first-turn question is replayed, not re-asked ----
+
+const ANSWER_TTL_MS = 7 * 86_400_000;
+const ANSWER_CAP = 200;
+const SELECTION_QUERY_CHARS = 1200;
+type CachedAnswer = { key: string; at: number; events: StreamEvent[] };
+
+function fnv(str: string, seed: number): string {
+  let h = seed >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h.toString(36);
+}
+const answerSlot = (key: string) => `answer-${fnv(key, 2166136261)}${fnv(key, 0x9747b28c)}`;
+
+/** Per source: chunk count, newest chunk id, and how many chunks lack an on-device vector (keyword search). */
+export async function answerKey(subjectId: number, subject: SubjectRow | undefined, payload: ChatPayload, ids: number[]): Promise<string> {
+  const parts = await Promise.all(
+    [...new Set(ids)].sort((a, b) => a - b).map(async (id) => {
+      const chunks = await db.chunks.where("source_id").equals(id).toArray();
+      const maxId = chunks.reduce((m, c) => Math.max(m, c.id ?? 0), 0);
+      const bare = chunks.filter((c) => c.embedding?.length !== EMBED_DIM).length;
+      return `${id}:${chunks.length}:${maxId}:${bare}`;
+    }),
+  );
+  const q = payload.message.trim().toLowerCase().replace(/\s+/g, " ");
+  return JSON.stringify([subjectId, payload.mode === "general" ? "general" : "sources", subject?.ib_course ?? "", subject?.ib_level ?? "", parts, payload.selection?.text.trim() ?? "", q]);
+}
+
+/** Consecutive text events become one, so a saved answer is a handful of events instead of hundreds. */
+export function mergeText(events: StreamEvent[]): StreamEvent[] {
+  const out: StreamEvent[] = [];
+  for (const e of events) {
+    const last = out[out.length - 1];
+    if (e.type === "text" && last?.type === "text") out[out.length - 1] = { ...last, text: last.text + e.text };
+    else out.push(e);
+  }
+  return out;
+}
+
+/** Only a finished, non-empty answer is worth replaying: not a cut-off, dropped or blank one. */
+export function cacheableAnswer(finish: string | null, events: StreamEvent[]): boolean {
+  if (finish !== "STOP") return false; // Cerebras's normal stop is mapped to "STOP" in cerebrasStream
+  return mergeText(events).some((e) => e.type === "text" && e.text.trim() !== "");
+}
+
+async function saveAnswer(key: string, events: StreamEvent[]) {
+  try {
+    await db.settings.put({ key: answerSlot(key), value: { key, at: Date.now(), events: mergeText(events) } satisfies CachedAnswer });
+    const keys = await db.settings.where("key").startsWith("answer-").primaryKeys();
+    if (keys.length > ANSWER_CAP) {
+      const rows = (await db.settings.bulkGet(keys)).filter(Boolean).map((r) => ({ k: r!.key, at: (r!.value as CachedAnswer).at ?? 0 }));
+      rows.sort((a, b) => a.at - b.at);
+      await db.settings.bulkDelete(rows.slice(0, rows.length - ANSWER_CAP).map((r) => r.k));
+    }
+  } catch {}
+}
+
 export async function streamChat(
   subjectId: number,
   payload: ChatPayload,
-  onEvent: (e: StreamEvent) => void,
+  emitTo: (e: StreamEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  let onEvent = emitTo;
   await boot();
   const subject = await db.subjects.get(subjectId);
   const s = await getSettings();
   const general = payload.mode === "general";
   const ids = [...payload.source_ids];
   if (payload.selection && !ids.includes(payload.selection.source_id)) ids.push(payload.selection.source_id);
+  const firstTurn = !(payload.history ?? []).some((t) => t.content.trim());
+  let cacheKey: string | null = null;
+  if (firstTurn && payload.message.trim()) {
+    try {
+      cacheKey = await answerKey(subjectId, subject, payload, ids);
+      // A retry ("Try again") must ask the AI again, never replay the saved answer.
+      const hit = payload.fresh ? undefined : ((await db.settings.get(answerSlot(cacheKey)))?.value as CachedAnswer | undefined);
+      if (hit && hit.key === cacheKey && Date.now() - hit.at < ANSWER_TTL_MS && hit.events.length) {
+        hit.events.forEach(onEvent);
+        return;
+      }
+    } catch {
+      cacheKey = null;
+    }
+  }
+  const sent: StreamEvent[] = [];
+  const emit = (e: StreamEvent) => {
+    sent.push(e);
+    emitTo(e);
+  };
+  onEvent = emit;
   let hits: Retrieved[] = [];
   if (!general) try {
-    const query = payload.selection ? `${payload.selection.text}\n\n${payload.message}` : payload.message;
+    // The embedding model reads ~512 tokens: question first, and only the start of a long highlight.
+    const query = payload.selection ? `${payload.message}\n\n${payload.selection.text.slice(0, SELECTION_QUERY_CHARS)}` : payload.message;
     hits = await retrieve(subjectId, ids, query, s.retrievalK);
   } catch (e) {
     onEvent({ type: "error", message: message(e) });
@@ -580,7 +709,7 @@ export async function streamChat(
   const parser = new CiteParser(hits);
   let finish: string | null = null;
   try {
-    for await (const piece of streamGenerate(body, signal)) {
+    for await (const piece of streamGenerate(body, signal, { tag: "chat" })) {
       if (piece.text) parser.feed(piece.text).forEach(onEvent);
       if ("finish" in piece) finish = piece.finish ?? null;
     }
@@ -590,12 +719,14 @@ export async function streamChat(
     onEvent({ type: "error", message: e instanceof GeminiError ? e.message : "The connection to Gemini dropped. Try again." });
     return;
   }
-  if (finish === "MAX_TOKENS") onEvent({ type: "text", text: "\n\n_(answer cut off at the length limit)_" });
+  const cutOff = finish === "MAX_TOKENS";
+  if (cutOff) onEvent({ type: "text", text: "\n\n_(answer cut off at the length limit)_" });
   else if (finish && ["SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"].includes(finish)) {
     onEvent({ type: "error", message: `Gemini stopped the answer (${finish}).` });
     return;
   }
   onEvent({ type: "done" });
+  if (cacheKey && !cutOff && cacheableAnswer(finish, sent) && hits.length + Number(general) > 0) await saveAnswer(cacheKey, sent);
 }
 
 // ---------------------------------------------------------------- speech
@@ -643,7 +774,7 @@ async function renderEpisodeAudio(art: ArtifactRow): Promise<Blob> {
   const parts: Uint8Array[] = [];
   let rate = 24000;
   for (const g of groups) {
-    const out = await patiently(() => speak(g as { speaker: string; text: string }[], speakers, VOICES), 3);
+    const out = await patiently(() => speak(g as { speaker: string; text: string }[], speakers, VOICES, { tag: "audio" }));
     parts.push(out.pcm);
     rate = out.rate;
   }
@@ -903,10 +1034,15 @@ export const localApi = {
     return url;
   },
 
+  /** Re-embed chunks that still have an older vector, on the device. Resolves when done. */
+  reembedStale,
+  /** Settle or restart interrupted jobs (also a test seam). */
+  resumeJobs,
   exportBackup: () => exportAll(),
   importBackup: async (file: Blob) => {
     const res = await importAll(file);
     await resumeJobs();
+    void reembedStale();
     return res;
   },
   /** Recall cards due now across every deck (for the daily reminder). */

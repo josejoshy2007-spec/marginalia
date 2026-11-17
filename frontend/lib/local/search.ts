@@ -1,29 +1,38 @@
 /**
- * Search over the device's chunks. Embeddings are unit length, so cosine similarity is a dot
- * product. Vectors are cached per source in memory (a 900-page book ≈ 3,000 chunks ≈ 9 MB).
- * Only the given (checked) sources are searched; an empty list returns nothing, never "everything".
+ * Search over the device's chunks, with no API calls. Chunks carry 384-d unit-length vectors from the
+ * on-device model (embedder.ts), so cosine similarity is a dot product. Chunks that still have an
+ * older vector (e.g. 768-d from Gemini, until the background re-embed reaches them) or when the model
+ * can't load are searched by keywords instead (BM25). If both kinds are in play the two rankings are
+ * merged with reciprocal-rank fusion. Only the given (checked) sources are searched; an empty list
+ * returns nothing, never "everything".
  */
 import { db, type ChunkRow, type Citation, type SourceRow } from "./db";
-import { embed } from "./gemini";
+import { embedQuery } from "./embedder";
+import { EMBED_DIM } from "./settings";
 import { pageLabel } from "../labels";
 
 export type Retrieved = { chunk: ChunkRow; source: SourceRow; score: number };
 
-type Cached = { chunks: ChunkRow[] };
+type Bm25 = { tf: Map<string, number>[]; len: number[]; df: Map<string, number>; avg: number };
+type Cached = { chunks: ChunkRow[]; bm25?: Bm25 };
 const cache = new Map<number, Cached>();
 
 export function forgetSource(sourceId: number) {
   cache.delete(sourceId);
 }
 
-async function sourceChunks(sourceId: number): Promise<ChunkRow[]> {
+async function cached(sourceId: number): Promise<Cached> {
   let c = cache.get(sourceId);
   if (!c) {
     const chunks = await db.chunks.where("source_id").equals(sourceId).sortBy("ord");
     c = { chunks };
     cache.set(sourceId, c);
   }
-  return c.chunks;
+  return c;
+}
+
+async function sourceChunks(sourceId: number): Promise<ChunkRow[]> {
+  return (await cached(sourceId)).chunks;
 }
 
 async function readySources(subjectId: number, sourceIds: number[]): Promise<SourceRow[]> {
@@ -33,23 +42,102 @@ async function readySources(subjectId: number, sourceIds: number[]): Promise<Sou
     .sort((a, b) => a.id! - b.id!);
 }
 
+export const hasLocalVector = (c: ChunkRow) => c.embedding?.length === EMBED_DIM;
+
+// ---------------------------------------------------------------- keyword search (BM25)
+
+export const tokenize = (text: string): string[] => (text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((w) => w.length >= 3);
+
+function bm25Index(c: Cached): Bm25 {
+  if (c.bm25) return c.bm25;
+  const tf: Map<string, number>[] = [];
+  const len: number[] = [];
+  const df = new Map<string, number>();
+  for (const chunk of c.chunks) {
+    const m = new Map<string, number>();
+    const words = tokenize(chunk.text);
+    for (const w of words) m.set(w, (m.get(w) ?? 0) + 1);
+    for (const w of m.keys()) df.set(w, (df.get(w) ?? 0) + 1);
+    tf.push(m);
+    len.push(words.length);
+  }
+  const avg = len.reduce((a, b) => a + b, 0) / Math.max(1, len.length);
+  return (c.bm25 = { tf, len, df, avg });
+}
+
+const K1 = 1.4;
+const B = 0.75;
+
+/** BM25 score of the given chunk indexes of one cached source. */
+function bm25Scores(c: Cached, indexes: number[], terms: string[]): number[] {
+  const idx = bm25Index(c);
+  const n = c.chunks.length;
+  return indexes.map((i) => {
+    let score = 0;
+    for (const t of terms) {
+      const f = idx.tf[i].get(t);
+      if (!f) continue;
+      const df = idx.df.get(t) ?? 0;
+      const idf = Math.log(1 + (n - df + 0.5) / (df + 0.5));
+      score += (idf * f * (K1 + 1)) / (f + K1 * (1 - B + (B * idx.len[i]) / (idx.avg || 1)));
+    }
+    return score;
+  });
+}
+
+// ---------------------------------------------------------------- retrieval
+
 export async function retrieve(subjectId: number, sourceIds: number[], query: string, k: number): Promise<Retrieved[]> {
   if (!sourceIds.length) return [];
   const sources = await readySources(subjectId, sourceIds);
   if (!sources.length) return [];
-  const [q] = await embed([query], "RETRIEVAL_QUERY");
-  const hits: Retrieved[] = [];
-  for (const source of sources) {
-    for (const chunk of await sourceChunks(source.id!)) {
-      const v = chunk.embedding;
-      if (!v || v.length !== q.length) continue;
-      let dot = 0;
-      for (let i = 0; i < v.length; i++) dot += v[i] * q[i];
-      hits.push({ chunk, source, score: dot });
+
+  const vector: Retrieved[] = [];
+  const keyword: Retrieved[] = [];
+  const entries = await Promise.all(sources.map(async (source) => ({ source, c: await cached(source.id!) })));
+  const anyLocal = entries.some((e) => e.c.chunks.some(hasLocalVector));
+  let q: Float32Array | null = null;
+  if (anyLocal) {
+    try {
+      q = await embedQuery(query);
+    } catch {
+      q = null; // the model could not load: everything falls back to keywords
     }
   }
-  hits.sort((a, b) => b.score - a.score);
-  return hits.slice(0, k);
+  const terms = [...new Set(tokenize(query))];
+  for (const { source, c } of entries) {
+    const kwIdx: number[] = [];
+    c.chunks.forEach((chunk, i) => {
+      if (q && hasLocalVector(chunk)) {
+        const v = chunk.embedding;
+        let dot = 0;
+        for (let j = 0; j < v.length; j++) dot += v[j] * q![j];
+        vector.push({ chunk, source, score: dot });
+      } else kwIdx.push(i);
+    });
+    if (kwIdx.length && terms.length) {
+      const scores = bm25Scores(c, kwIdx, terms);
+      kwIdx.forEach((i, j) => {
+        if (scores[j] > 0) keyword.push({ chunk: c.chunks[i], source, score: scores[j] });
+      });
+    }
+  }
+  vector.sort((a, b) => b.score - a.score);
+  keyword.sort((a, b) => b.score - a.score);
+  if (!keyword.length) return vector.slice(0, k);
+  if (!vector.length) return keyword.slice(0, k);
+  // Both kinds: reciprocal-rank fusion (scores of the two methods aren't comparable).
+  const fused = new Map<number, Retrieved & { rrf: number }>();
+  for (const list of [vector, keyword])
+    list.forEach((r, rank) => {
+      const f = fused.get(r.chunk.id!) ?? { ...r, rrf: 0 };
+      f.rrf += 1 / (60 + rank + 1);
+      fused.set(r.chunk.id!, f);
+    });
+  return [...fused.values()]
+    .sort((a, b) => b.rrf - a.rrf)
+    .slice(0, k)
+    .map(({ rrf, ...r }) => ({ ...r, score: rrf }));
 }
 
 /** Chunks a generator sees: focus-matched, or spread evenly through each source. */

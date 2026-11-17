@@ -68,7 +68,7 @@ export async function readAnswer(files: Blob[], question?: string) {
       "numbering; keep line breaks and bullet points; leave out text that is clearly crossed out; write " +
       "[illegible] for words you cannot read; write equations and code as plain text. Do not add anything.",
     TEXT_SCHEMA,
-    { parts: await imageParts(files) },
+    { parts: await imageParts(files), tag: "photo" },
   );
   const text = (out.text || "").trim();
   if (!text) throw new GeminiError("Couldn't find any handwriting in that photo. Try a sharper, well-lit photo.");
@@ -82,7 +82,7 @@ export async function readQuestion(files: Blob[]) {
       "and part labels like (a). If the mark value is shown (e.g. [4] or (4 marks)), put the number in " +
       "`marks` and leave it out of `text`. If several questions are shown, transcribe the first complete one.",
     TEXT_SCHEMA,
-    { parts: await imageParts(files) },
+    { parts: await imageParts(files), tag: "photo" },
   );
   const text = (out.text || "").trim();
   if (!text) throw new GeminiError("Couldn't find a question in that photo. Try a sharper, well-lit photo.");
@@ -105,7 +105,7 @@ export async function readQuizAnswers(files: Blob[], questions: Rec[]): Promise<
       "grammar, leave out crossed-out text, [illegible] for unreadable words). Match answers to questions by " +
       "the numbers they wrote; if they changed an answer, use the final one. Skip questions with no answer.",
     QUIZ_SCHEMA,
-    { parts: await imageParts(files) },
+    { parts: await imageParts(files), tag: "photo" },
   );
   const answers: (number | string | null)[] = questions.map((q) => ((q.type ?? "mcq") === "mcq" ? -1 : null));
   for (const a of out.answers ?? []) {

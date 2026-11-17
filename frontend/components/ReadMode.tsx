@@ -15,7 +15,7 @@ type Props = {
   activeThreadId: string | null;
   onActivate: (id: string | null) => void;
   onSelectText: (sourceId: number, anchor: Anchor) => void;
-  onAsk: (t: Thread, message: string) => void;
+  onAsk: (t: Thread, message: string, fresh?: boolean) => void;
   onDiscard: (id: string) => void;
   onCite: (c: Citation) => void;
   onGoLibrary: () => void;
@@ -332,7 +332,7 @@ function MarginColumn({
   docRef: React.RefObject<HTMLDivElement | null>;
   activeThreadId: string | null;
   onActivate: (id: string | null) => void;
-  onAsk: (t: Thread, m: string) => void;
+  onAsk: (t: Thread, m: string, fresh?: boolean) => void;
   onDiscard: (id: string) => void;
   onCite: (c: Citation) => void;
 }) {

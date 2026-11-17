@@ -155,7 +155,7 @@ export async function buildExam(
       "`cite` lists the passage numbers each question is based on." +
       focusLine(focus),
     EXAM_SCHEMA,
-    { ctx },
+    { ctx, tag: "exam" },
   );
   const questions = (out.questions ?? []).map((x: Rec) => cleanQuestion(x, ps.length)).filter(Boolean) as Rec[];
   if (!questions.length) throw new GeminiError("Gemini didn't produce usable questions. Try again.");
@@ -181,7 +181,7 @@ export async function draftMarkscheme(
       "Return a single-item `questions` array: copy the question text, identify its command term, set " +
       `\`marks\` to ${marks}, and use markbands only for an extended Discuss/Evaluate/To-what-extent item.`,
     EXAM_SCHEMA,
-    { ctx, geminiOnly: true },
+    { ctx, geminiOnly: true, tag: "markscheme" },
   );
   const qs = (out.questions ?? []).map((x: Rec) => cleanQuestion(x, ps.length)).filter(Boolean) as Rec[];
   if (!qs.length) throw new GeminiError("Couldn't build a markscheme for that question. Try rephrasing it.");
@@ -218,7 +218,7 @@ export async function markAnswer(question: Rec, answer: string, courseLabel: str
       "`strengths`/`improvements`, and leave `points` empty. `model_answer` is a concise answer that would " +
       "earn full marks.",
     MARK_SCHEMA,
-    { geminiOnly: true },
+    { geminiOnly: true, tag: "exam-mark" },
   );
   const max = question.marks;
   const ms = question.markscheme;
@@ -328,7 +328,7 @@ export async function markQuiz(questions: Rec[], answers: unknown[], courseLabel
       "\n\nReturn one result per item: its `index`, `marks_awarded`, for long items `points_awarded` (marks " +
       "per markscheme point, in order), and a `comment` saying what earned or missed marks.",
     QUIZ_MARK_SCHEMA,
-    { geminiOnly: true },
+    { geminiOnly: true, tag: "quiz-mark" },
   );
   const byIndex = new Map<number, Rec>();
   for (const r of out.results ?? []) if (Number.isInteger(r.index)) byIndex.set(r.index, r);

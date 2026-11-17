@@ -5,7 +5,7 @@
  * The APK uses base "" (Capacitor serves out/ at the web root); GitHub Pages uses "/<repo>".
  */
 import { spawnSync } from "node:child_process";
-import { copyFileSync, cpSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 
@@ -16,6 +16,10 @@ const env = { ...process.env, NEXT_OUTPUT: "export", NEXT_PUBLIC_ENGINE: "local"
 rmSync(".next/server", { recursive: true, force: true });
 // pdf.js reads PDFs in a worker served next to the app.
 copyFileSync("node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs", "public/pdf.worker.min.mjs");
+// The on-device embedding model's WASM runtime (onnxruntime-web, via transformers.js) is served from here, not a CDN.
+mkdirSync("public/ort", { recursive: true });
+for (const f of ["ort-wasm-simd-threaded.jsep.mjs", "ort-wasm-simd-threaded.jsep.wasm"])
+  copyFileSync(`node_modules/@huggingface/transformers/dist/${f}`, `public/ort/${f}`);
 const r = spawnSync(process.execPath, ["node_modules/next/dist/bin/next", "build"], { env, stdio: "inherit" });
 if (r.status !== 0) process.exit(r.status ?? 1);
 
@@ -54,10 +58,17 @@ walk(out);
 const hash = createHash("sha256");
 for (const f of files) hash.update(readFileSync(f));
 const version = hash.digest("hex").slice(0, 12);
-const urls = files.map((f) => `${base}/` + path.relative(out, f).split(path.sep).join("/").replace(/(^|\/)index\.html$/, "$1"));
+// The ~55 MB model + WASM runtime are cached on first use (sw.js) rather than blocking the install precache.
+const heavy = (f) => /^(models|ort)[\\/]/.test(path.relative(out, f));
+// Version of the cached model files: a hash of everything under models/ and ort/.
+const modelHash = createHash("sha256");
+for (const f of files.filter(heavy).sort()) modelHash.update(path.relative(out, f).split(path.sep).join("/")).update(readFileSync(f));
+const modelVersion = modelHash.digest("hex").slice(0, 10);
+const urls = files.filter((f) => !heavy(f)).map((f) => `${base}/` + path.relative(out, f).split(path.sep).join("/").replace(/(^|\/)index\.html$/, "$1"));
 const sw = readFileSync("scripts/sw.template.js", "utf8")
   .replace("__VERSION__", version)
   .replace("__BASE__", base)
+  .replace("__MODEL_VERSION__", modelVersion)
   .replace('"__FILES__"', JSON.stringify(urls));
 writeFileSync(path.join(out, "sw.js"), sw);
 console.log(`PWA: ${urls.length} files precached (version ${version}), base "${base || "/"}"`);

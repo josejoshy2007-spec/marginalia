@@ -149,7 +149,7 @@ export async function buildDeck(ps: Retrieved[], count: number, focus: string | 
       "comparisons and applications). Backs are short, complete answers (1–3 sentences). One idea per card. " +
       "`cite` lists the passage numbers that support the back." + focusLine(focus),
     DECK_SCHEMA,
-    o,
+    { ...o, tag: "deck" },
   );
   const cards = (out.cards ?? [])
     .filter((c: Rec) => str(c.front) && str(c.back))
@@ -234,7 +234,7 @@ export async function buildQuiz(
       "`cite` lists supporting passage numbers." +
       focusLine(focus),
     QUIZ_SCHEMA,
-    o,
+    { ...o, tag: "quiz" },
   );
   const questions = (out.questions ?? []).map((x: Rec) => cleanQuizQuestion(x, ps.length)).filter(Boolean);
   if (!questions.length) throw new GeminiError("Gemini didn't produce usable questions. Try again.");
@@ -249,7 +249,7 @@ export async function buildSheet(ps: Retrieved[], subtype: string, focus: string
       "short paragraphs and flat bullet lists. Cite passages inline as [n] right after the claims they support." +
       focusLine(focus),
     SHEET_SCHEMA,
-    o,
+    { ...o, tag: "sheet" },
   );
   const body = str(out.body);
   if (!body) throw new GeminiError("Gemini returned an empty sheet. Try again.");
@@ -265,7 +265,7 @@ export async function buildConceptMap(ps: Retrieved[], focus: string | null | un
       "relates to its parent. Ids are short unique strings. `cite` lists supporting passage numbers." +
       focusLine(focus),
     MAP_SCHEMA,
-    o,
+    { ...o, tag: "map" },
   );
   const nodes: Rec[] = out.nodes ?? [];
   const ids = new Set(nodes.map((n) => n.id));
@@ -306,7 +306,7 @@ export async function buildEpisode(
       "(empty for pure banter). `summary` is one sentence describing the episode." +
       focusLine(focus),
     EPISODE_SCHEMA,
-    o,
+    { ...o, tag: "episode" },
   );
   const lines: Rec[] = [];
   for (const ln of out.lines ?? []) {

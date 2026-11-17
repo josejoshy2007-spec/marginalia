@@ -194,7 +194,7 @@ export default function App() {
   );
 
   const ask = useCallback(
-    async (thread: Thread, message: string) => {
+    async (thread: Thread, message: string, fresh = false) => {
       if (subjectId == null || thread.busy) return;
       const sid = subjectId;
       const general = thread.mode === "general";
@@ -239,6 +239,7 @@ export default function App() {
             selection: general ? null : selection,
             history,
             mode: general ? "general" : "sources",
+            fresh,
           },
           (e) => {
             if (e.type === "text") lastTurn((t) => ({ ...t, body: t.body + e.text }));
@@ -395,7 +396,7 @@ export default function App() {
               onDelete={discardThread}
               onRetry={(t) => {
                 const r = forRetry(t);
-                if (r) ask(r.trimmed, r.question);
+                if (r) ask(r.trimmed, r.question, true);
               }}
               onCite={onCite}
               checkedCount={checkedIds.length}
@@ -424,7 +425,7 @@ export default function App() {
             }}
             onRetry={() => {
               const r = forRetry(sheetThread);
-              if (r) ask(r.trimmed, r.question);
+              if (r) ask(r.trimmed, r.question, true);
             }}
           />
         )}

@@ -4,12 +4,96 @@ import { useEffect, useRef, useState } from "react";
 import { checkKey } from "@/lib/local/gemini";
 import { checkCerebrasKey } from "@/lib/local/cerebras";
 import { DEFAULTS, getSettings, saveSettings, type Settings } from "@/lib/local/settings";
+import { clearExhausted, exhaustedModels, getUsage, resetUsage, type UsageDay } from "@/lib/local/usage";
 import { localApi } from "@/lib/local/store";
 import { saveFile, scheduleReminder, isNative } from "@/lib/native";
 import { CloseIcon } from "./icons";
 import DriveSync from "./DriveSync";
 import { Segmented } from "./study/shared";
 import { applyTheme } from "@/lib/theme";
+
+type UsageView = UsageDay & { geminiTotal: number; cerebrasTotal: number; exhausted: Record<string, string> };
+
+const top = (r: Record<string, number>) => Object.entries(r).sort((a, b) => b[1] - a[1]);
+
+/** "AI usage today": calls sent to Gemini by feature, the daily budget, and which models are out for the day. */
+function UsageSection({ s, update }: { s: Settings; update: (patch: Partial<Settings>) => Promise<void> }) {
+  const [u, setU] = useState<UsageView | null>(null);
+  const [budget, setBudget] = useState(String(s.dailyBudget));
+  const load = async () => setU({ ...(await getUsage()), exhausted: await exhaustedModels() });
+  useEffect(() => {
+    load().catch(() => {});
+  }, []);
+  const commit = () => {
+    const n = Math.max(0, Math.floor(Number(budget)));
+    const v = Number.isFinite(n) ? n : s.dailyBudget;
+    setBudget(String(v));
+    if (v !== s.dailyBudget) update({ dailyBudget: v });
+  };
+  const used = u?.geminiTotal ?? 0;
+  const pct = s.dailyBudget > 0 ? Math.min(100, (used / s.dailyBudget) * 100) : 0;
+  const over = s.dailyBudget > 0 && used >= s.dailyBudget;
+  const when = (iso: string) => new Date(iso).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  return (
+    <section className="mt-6 border-t border-line pt-4">
+      <h3 className="text-sm font-semibold">AI usage today</h3>
+      <p className="mt-1 text-sm">
+        <span className={over ? "text-danger" : ""}>{used}</span>
+        <span className="text-muted"> / {s.dailyBudget > 0 ? s.dailyBudget : "no limit"} Gemini calls</span>
+      </p>
+      {s.dailyBudget > 0 && (
+        <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sunken" role="progressbar" aria-valuemin={0} aria-valuemax={s.dailyBudget} aria-valuenow={used} aria-label="Gemini calls used today">
+          <div className={`h-full rounded ${over ? "bg-danger" : "bg-accent"}`} style={{ width: `${pct}%` }} />
+        </div>
+      )}
+      {u && top(u.gemini).length > 0 && (
+        <ul className="mt-2 grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-muted">
+          {top(u.gemini).slice(0, 8).map(([tag, n]) => (
+            <li key={tag} className="flex justify-between">
+              <span>{tag}</span>
+              <span className="tabular-nums text-ink">{n}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {u && u.cerebrasTotal > 0 && <p className="mt-2 text-xs text-muted">Cerebras: {u.cerebrasTotal} calls today (not limited by the budget).</p>}
+      {u && Object.keys(u.exhausted).length > 0 && (
+        <div className="mt-2 text-xs text-muted">
+          <p>Out of free quota for today (skipped until reset):</p>
+          <ul className="mt-0.5">
+            {Object.entries(u.exhausted).map(([m, until]) => (
+              <li key={m}>
+                {m} <span className="text-muted">until {when(until)}</span>
+              </li>
+            ))}
+          </ul>
+          <button type="button" className="mt-1 underline" onClick={() => clearExhausted().then(load)}>
+            Try them again
+          </button>
+        </div>
+      )}
+      <label className="mt-3 flex items-center gap-2 text-sm">
+        Daily budget
+        <input
+          className="field !w-24 !py-1"
+          type="number"
+          min={0}
+          step={50}
+          inputMode="numeric"
+          aria-label="Daily Gemini call budget"
+          value={budget}
+          onChange={(e) => setBudget(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => e.key === "Enter" && commit()}
+        />
+        <span className="text-xs text-muted">0 = no limit</span>
+      </label>
+      <button type="button" className="mt-2 text-xs text-muted underline" onClick={() => resetUsage().then(load)}>
+        Reset counter
+      </button>
+    </section>
+  );
+}
 
 const mb = (n: number) => (n > 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`);
 
@@ -70,6 +154,8 @@ export default function SettingsSheet({
     const err = await checkKey(key);
     setChecking(false);
     if (err) return setKeyMsg({ ok: false, text: err });
+    // A different key has its own free quota: forget which models the old one had used up.
+    if (key.trim() !== (s?.geminiKey ?? "").trim()) await clearExhausted();
     await update({ geminiKey: key.trim() });
     setKeyMsg({ ok: true, text: "Key works and is saved on this device." });
     if (firstRun) setTimeout(onClose, 700);
@@ -189,6 +275,8 @@ export default function SettingsSheet({
 
         {!firstRun && (
           <>
+            <UsageSection s={s} update={update} />
+
             <section className="mt-6 border-t border-line pt-4">
               <h3 className="text-sm font-semibold">Extra free AI (optional)</h3>
               <p className="mt-1 text-xs text-muted">
@@ -313,7 +401,6 @@ export default function SettingsSheet({
                     ["fallbackModel", "Backup model"],
                     ["extraModels", "Extra models"],
                     ["ttsModel", "Speech model"],
-                    ["embedModel", "Search model"],
                   ] as const
                 ).map(([k, label]) => (
                   <label key={k} className="contents">

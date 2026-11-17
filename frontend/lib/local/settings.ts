@@ -20,6 +20,8 @@ export type Settings = {
   syncOn: boolean; // Google Drive sync connected
   syncEmail: string;
   lastSyncAt: string;
+  dailyBudget: number; // max Gemini requests per local day; 0 = no limit (usage.ts)
+  exhausted: Record<string, string>; // model -> ISO time its free daily quota resets (skipped until then)
 };
 
 export const DEFAULTS: Settings = {
@@ -41,17 +43,21 @@ export const DEFAULTS: Settings = {
   syncOn: false,
   syncEmail: "",
   lastSyncAt: "",
+  dailyBudget: 750,
+  exhausted: {},
 };
 
 export const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
-export const EMBED_DIM = 768;
+/** Size of the on-device embedding model (bge-small-en-v1.5). Older Gemini vectors were 768-d. */
+export const EMBED_DIM = 384;
 
 let cache: Settings | null = null;
 
 export async function getSettings(): Promise<Settings> {
   if (cache) return cache;
   const rows = await db.settings.toArray();
-  const stored = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  // answer-* (cached answers) and usage-* (call counters) share the table but are not settings
+  const stored = Object.fromEntries(rows.filter((r) => !/^(answer|usage)-/.test(r.key)).map((r) => [r.key, r.value]));
   cache = { ...DEFAULTS, ...(stored as Partial<Settings>) };
   return cache;
 }
