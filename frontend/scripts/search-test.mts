@@ -142,7 +142,7 @@ ok("re-embed: 384-d, same text and offsets, status still ready, vector search wo
     const w: any = { terminated: false, onmessage: null, onerror: null, onmessageerror: null, postMessage: (m: any) => onPost(w, m), terminate: () => (w.terminated = true) };
     return w;
   };
-  const quick = { first: 80, passage: 80, query: 40 };
+  const quick = { first: 80, passage: 80, query: 40, ready: 5000 };
   const within = async <T,>(p: Promise<T>, ms = 3000) => Promise.race([p, new Promise<never>((_, r) => setTimeout(() => r(new Error("hung")), ms))]);
 
   // silent worker: times out, is terminated, and the call is answered on the main thread; later calls skip the worker
@@ -155,6 +155,19 @@ ok("re-embed: 384-d, same text and offsets, status still ready, vector search wo
   await within(embedder(["b"], "query"));
   assert.equal(made.length, 1, "broken worker is not recreated");
   assert.equal(mainCalls, 2);
+
+  // a worker that never announces itself (blocked bootstrap): falls back after the short ready timeout, not the long first timeout
+  mainCalls = 0;
+  made = [];
+  configureEmbedderForTests({ worker: () => (made.push(mkWorker(() => {})()), made.at(-1)), timeouts: { first: 5000, passage: 5000, query: 5000, ready: 40 }, main });
+  const t0 = Date.now();
+  await within(embedder(["a"], "passage"));
+  assert.ok(Date.now() - t0 < 2000, "fell back after the ready timeout");
+  assert.equal(mainCalls, 1);
+  assert.ok(made[0].terminated, "unstarted worker terminated");
+  const { embedPassages } = await import("../lib/local/embedder");
+  await assert.rejects(embedPassages(["x"], { allowMain: false }), /unavailable/);
+  assert.equal(mainCalls, 1, "allowMain:false never runs the model on the main thread");
 
   // messageerror only
   mainCalls = 0;

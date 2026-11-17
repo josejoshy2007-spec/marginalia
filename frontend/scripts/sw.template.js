@@ -24,6 +24,16 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== self.location.origin) return; // Gemini etc. go to the network
+  if (e.request.destination === "worker" || /\/turbopack-worker-/.test(url.pathname)) {
+    // Turbopack workers read their start-up settings from the URL's #fragment. A cached Response carries
+    // its own URL (no fragment) and would replace it, so hand back a fresh Response, which has no URL.
+    e.respondWith(
+      caches.match(e.request, { ignoreSearch: true }).then((hit) =>
+        hit ? new Response(hit.body, { status: hit.status, statusText: hit.statusText, headers: hit.headers }) : fetch(e.request),
+      ),
+    );
+    return;
+  }
   if (e.request.mode === "navigate") {
     // App shell: network first (picks up updates), cached page when offline.
     e.respondWith(fetch(e.request).catch(() => caches.match(`${BASE}/`).then((r) => r || caches.match(e.request))));

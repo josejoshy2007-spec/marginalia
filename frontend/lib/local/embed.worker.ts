@@ -4,6 +4,8 @@ import { embedLocal } from "./embed-core";
 
 type Req = { id: number; texts: string[]; kind: "query" | "passage" };
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
+// Handshake: tells the page this script really started (a blocked bootstrap never gets here).
+ctx.postMessage({ ready: true });
 ctx.onmessage = async (e: MessageEvent<Req>) => {
   const { id, texts, kind } = e.data;
   try {

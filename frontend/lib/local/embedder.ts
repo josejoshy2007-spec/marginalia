@@ -13,7 +13,7 @@ export function setEmbedder(e: Embedder | null) {
   override = e;
 }
 
-type WorkerReply = { id: number; vectors?: Float32Array[]; error?: string; loadFailed?: boolean };
+type WorkerReply = { id?: number; ready?: boolean; vectors?: Float32Array[]; error?: string; loadFailed?: boolean };
 type WorkerLike = {
   postMessage(m: unknown): void;
   terminate(): void;
@@ -23,8 +23,9 @@ type WorkerLike = {
 };
 
 /** How long a worker may stay silent before it is declared dead. The first call includes loading the model. */
-export type EmbedTimeouts = { first: number; passage: number; query: number };
-const DEFAULT_TIMEOUTS: EmbedTimeouts = { first: 180_000, passage: 120_000, query: 20_000 };
+export type EmbedTimeouts = { first: number; passage: number; query: number; ready: number };
+/** `ready`: the worker script must announce itself within this long, or it never started (e.g. blocked bootstrap). */
+const DEFAULT_TIMEOUTS: EmbedTimeouts = { first: 180_000, passage: 120_000, query: 20_000, ready: 10_000 };
 let timeouts = DEFAULT_TIMEOUTS;
 let workerFactory: (() => WorkerLike) | null = null;
 let mainEmbedder: Embedder = embedLocal;
@@ -32,6 +33,7 @@ let mainEmbedder: Embedder = embedLocal;
 let worker: WorkerLike | null = null;
 let workerBroken = false;
 let workerLoaded = false; // a request has succeeded, so the model is loaded and queries should be quick
+let readyTimer: ReturnType<typeof setTimeout> | null = null;
 let nextId = 0;
 const pending = new Map<number, { resolve: (v: Float32Array[]) => void; reject: (e: Error) => void }>();
 
@@ -43,8 +45,14 @@ function failAll(msg: string) {
 }
 
 /** Give up on the worker: stop it, remember that, and let every waiting call fall back to the main thread. */
+function clearReadyTimer() {
+  if (readyTimer) clearTimeout(readyTimer);
+  readyTimer = null;
+}
+
 function breakWorker(msg: string) {
   workerBroken = true;
+  clearReadyTimer();
   const w = worker;
   worker = null;
   try {
@@ -59,6 +67,7 @@ function breakWorker(msg: string) {
 export function configureEmbedderForTests(o: { worker?: () => WorkerLike; timeouts?: Partial<EmbedTimeouts>; main?: Embedder } = {}) {
   const w = worker;
   worker = null;
+  clearReadyTimer();
   try {
     w?.terminate();
   } catch {
@@ -80,6 +89,8 @@ function getWorker(): WorkerLike | null {
     const w = workerFactory ? workerFactory() : (new Worker(new URL("./embed.worker.ts", import.meta.url), { type: "module" }) as unknown as WorkerLike);
     w.onmessage = (e) => {
       if (worker !== w) return; // a reply from a worker we already gave up on
+      clearReadyTimer(); // any message proves the script is running
+      if (e.data.ready || e.data.id === undefined) return;
       const p = pending.get(e.data.id);
       if (!p) return;
       pending.delete(e.data.id);
@@ -96,6 +107,8 @@ function getWorker(): WorkerLike | null {
     w.onerror = () => worker === w && breakWorker("worker error");
     w.onmessageerror = () => worker === w && breakWorker("worker messageerror");
     worker = w;
+    clearReadyTimer();
+    readyTimer = setTimeout(() => worker === w && breakWorker("worker did not start"), timeouts.ready);
     return w;
   } catch {
     workerBroken = true;
@@ -143,4 +156,12 @@ export const embedder: Embedder = async (texts, kind) => {
 };
 
 export const embedQuery = async (text: string) => (await embedder([text], "query"))[0];
-export const embedPassages = (texts: string[]) => embedder(texts, "passage");
+/** `allowMain: false` (background work): when the worker is unavailable, throw instead of running the model on the UI thread. */
+export async function embedPassages(texts: string[], opts: { allowMain?: boolean } = {}): Promise<Float32Array[]> {
+  if (opts.allowMain === false && !override && texts.length && !getWorker()) throw new Error("embedding worker unavailable");
+  if (opts.allowMain === false && !override && texts.length) {
+    const w = getWorker();
+    if (w) return viaWorker(w, texts, "passage"); // a WorkerFailure here also stops the caller; no main-thread fallback
+  }
+  return embedder(texts, "passage");
+}

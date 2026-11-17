@@ -305,10 +305,11 @@ function reembedStale(): Promise<void> {
           const batch = stale.slice(i, i + EMBED_BATCH);
           let vecs: Float32Array[];
           try {
-            vecs = await embedPassages(batch.map((c) => c.text));
+            vecs = await embedPassages(batch.map((c) => c.text), { allowMain: false });
           } catch {
-            return; // the model can't load (yet): keyword search keeps working; try again next start
+            return; // the worker/model isn't available (yet): keyword search keeps working; try again next start
           }
+          await new Promise((r) => setTimeout(r, 0)); // let the UI breathe between batches
           if (!(await db.sources.get(s.id!))) break; // deleted meanwhile
           await db.transaction("rw", db.chunks, () => Promise.all(batch.map((c, j) => db.chunks.update(c.id!, { embedding: vecs[j] }))));
           forgetSource(s.id!);
