@@ -4,26 +4,63 @@
     {
       "name": "api",
       "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "--directory", "backend", "uvicorn", "app.main:app", "--port", "8000"],
+      "runtimeArgs": [
+        "run",
+        "--directory",
+        "backend",
+        "uvicorn",
+        "app.main:app",
+        "--port",
+        "8000"
+      ],
       "port": 8000
     },
     {
       "name": "web",
       "runtimeExecutable": "C:\\Program Files\\nodejs\\npm.cmd",
-      "runtimeArgs": ["--prefix", "frontend", "run", "dev"],
+      "runtimeArgs": [
+        "--prefix",
+        "frontend",
+        "run",
+        "dev"
+      ],
       "port": 3000
     },
     {
       "name": "web-local",
       "runtimeExecutable": "C:\\Program Files\\nodejs\\npm.cmd",
-      "runtimeArgs": ["--prefix", "frontend", "run", "dev:local"],
+      "runtimeArgs": [
+        "--prefix",
+        "frontend",
+        "run",
+        "dev:local"
+      ],
       "port": 3001
     },
     {
       "name": "static",
       "runtimeExecutable": "backend\\.venv\\Scripts\\python.exe",
-      "runtimeArgs": ["-m", "http.server", "3002", "-d", "frontend/out"],
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "3002",
+        "-d",
+        "frontend/out"
+      ],
       "port": 3002
+    },
+    {
+      "name": "static-base",
+      "runtimeExecutable": "backend\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "3004",
+        "-d",
+        "C:/Users/hp/AppData/Local/Temp/claude/ec9c1aaf5a8331ca/ca1b04ff-c615-4ef3-95ef-4e334401d594/scratchpad/site"
+      ],
+      "port": 3004,
+      "url": "http://localhost:3004"
     }
   ]
 }

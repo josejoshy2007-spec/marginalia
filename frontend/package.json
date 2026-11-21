@@ -25,7 +25,7 @@
     "test:nav": "tsx scripts/nav-test.mts",
     "typecheck": "tsc --noEmit",
     "calibrate": "tsx scripts/calibrate.mts",
-    "test:all": "npm run typecheck && npm run test:sync && npm run test:theme && npm run test:style -- --components && npm run test:search && npm run test:reuse && npm run test:cards &&npm run test:providers && npm run test:answers && npm run test:reflow && npm run test:ib && npm run test:cite && npm run test:aipages && npm run test:paste && npm run test:nav"
+    "test:all": "npm run typecheck && npm run test:sync && npm run test:theme && npm run test:style -- --components && npm run test:search && npm run test:reuse && npm run test:cards && npm run test:providers && npm run test:answers && npm run test:reflow && npm run test:ib && npm run test:cite && npm run test:aipages && npm run test:paste && npm run test:nav"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
