@@ -74,14 +74,20 @@ export async function importAll(file: Blob): Promise<ImportResult> {
     }
     for (const s of data.sources ?? []) {
       const subject = subjectIds.get(s.subject_id);
-      if (subject == null || !s.text) continue; // failed/unfinished sources have nothing to keep
+      if (subject == null || (!s.text && !s.no_text_layer)) continue; // failed/unfinished sources have nothing to keep (a scanned PDF is kept for AI reading)
       const chunks = (chunksBySource.get(s.id) ?? []).filter((c) => typeof c.embedding === "string");
       // Any stored vector keeps the chunks (other-size ones are re-embedded on the device afterwards);
       // sources without vectors are re-indexed from their text, also on the device.
-      const usable = chunks.length > 0 && b64ToF32(chunks[0].embedding).length > 0;
+      // A scanned PDF nobody has read yet has no text and no chunks: that is complete as it is.
+      const usable = (chunks.length > 0 && b64ToF32(chunks[0].embedding).length > 0) || !String(s.text ?? "").trim();
       const row: SourceRow = {
-        subject_id: subject, kind: s.kind, title: s.title, url: s.url ?? null, text: s.text, pages: s.pages ?? [],
+        subject_id: subject, kind: s.kind, title: s.title, url: s.url ?? null, text: s.text ?? "", pages: s.pages ?? [],
         checked: s.checked ?? true, status: usable ? "ready" : "processing", error: null, created_at: s.created_at ?? now(),
+        // AI page readings live inside `text`; ai_pages says where (an old backup simply has none).
+        ...(Array.isArray(s.ai_pages) && s.ai_pages.length ? { ai_pages: s.ai_pages } : {}),
+        ...(s.content_rev ? { content_rev: s.content_rev } : {}),
+        ...(s.content_tag ? { content_tag: s.content_tag } : {}),
+        ...(s.no_text_layer ? { no_text_layer: true } : {}),
       };
       const id = await db.sources.add(row);
       sourceIds.set(s.id, id);

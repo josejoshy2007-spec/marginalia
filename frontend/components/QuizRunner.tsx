@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type SVGProps } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SVGProps } from "react";
 import { tap } from "@/lib/native";
 import {
   api,
@@ -59,6 +59,7 @@ const kindOf = (q: QuizQuestion) => q.type ?? "mcq";
 const blank = (qs: QuizQuestion[]): Answer[] => qs.map((q) => (kindOf(q) === "mcq" ? -1 : ""));
 
 export default function QuizRunner(p: StudyProps & { quizId: number; onExit: () => void; onOpen: (id: number) => void }) {
+  const rootRef = useRef<HTMLDivElement>(null);
   const [quiz, setQuiz] = useState<ArtifactDetail | null>(null);
   const [answers, setAnswers] = useState<Answer[]>([]);
   const [result, setResult] = useState<QuizResult | null>(null);
@@ -175,7 +176,7 @@ export default function QuizRunner(p: StudyProps & { quizId: number; onExit: () 
     : [];
 
   return (
-    <div className="mx-auto max-w-3xl px-4 pt-6 sm:px-6 sm:pt-8">
+    <div ref={rootRef} className="mx-auto max-w-3xl px-4 pt-6 sm:px-6 sm:pt-8">
       <button type="button" onClick={p.onExit} className="btn-ghost min-h-11">
         ← Quizzes
       </button>
@@ -477,6 +478,7 @@ export default function QuizRunner(p: StudyProps & { quizId: number; onExit: () 
             </span>
             <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap [&_button]:min-h-11">
             <PhotoButton
+              pasteScope={rootRef}
               label="Photo of my answers"
               busyLabel="Reading your answers…"
               onPhotos={async (files) => {

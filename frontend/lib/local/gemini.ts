@@ -7,7 +7,17 @@
  */
 import { GEMINI_BASE, getSettings, type Settings } from "./settings";
 import { cerebrasJson, cerebrasOpenStream, cerebrasStream } from "./cerebras";
-import { countCall, exhaustedModels, geminiToday, markExhausted } from "./usage";
+import {
+  CLAUDE_FAST_DEFAULT,
+  CLAUDE_STRONG_DEFAULT,
+  ClaudeError,
+  claudeCanTake,
+  claudeJson,
+  claudeOpenStream,
+  claudeStream,
+  claudeText,
+} from "./anthropic";
+import { countCall, exhaustedModels, geminiToday, geminiTokens, markExhausted, recordTokens } from "./usage";
 
 export class GeminiError extends Error {
   /** "minute": a per-minute quota (waiting a minute helps); "day": the daily quota is spent. */
@@ -244,16 +254,53 @@ export function liteModels(s: Settings): string[] {
 }
 
 /**
- * Where a text request goes: Gemini's main + backup model, then (out of quota, overloaded or
- * unreachable) Cerebras if the student added a key and the request allows it, then the extra
- * Gemini models. If everything fails, the first Gemini error is reported (it says why).
+ * Run Claude first when the student saved an Anthropic key and the request allows it; any Claude failure
+ * (bad key, rate limit, overload, refusal, malformed output) falls through to `rest`, the Gemini chain.
+ * With no Gemini key at all, the Claude error is what the student sees.
+ */
+async function claudeFirst<T>(
+  s: Settings,
+  r: { claude?: (key: string, model: string) => Promise<T>; claudeStrong?: boolean },
+  rest: () => Promise<T>,
+): Promise<T> {
+  if (!r.claude || !s.anthropicKey) return rest();
+  const model = (r.claudeStrong ? s.claudeStrongModel || CLAUDE_STRONG_DEFAULT : s.claudeFastModel || CLAUDE_FAST_DEFAULT).trim();
+  try {
+    return await r.claude(s.anthropicKey, model);
+  } catch (ce) {
+    if ((ce as Error).name === "AbortError") throw ce;
+    if (!s.geminiKey)
+      throw new GeminiError((ce as Error).message, ce instanceof ClaudeError && ce.kind === "rate" ? "minute" : null, true);
+  }
+  return rest();
+}
+
+/**
+ * Where a text request goes: Claude first if the student added an Anthropic key and the request allows it,
+ * then Gemini's main + backup model, then (out of quota, overloaded or unreachable) Cerebras if the
+ * student added a key and the request allows it, then the extra Gemini models. If everything fails,
+ * the first Gemini error is reported (it says why).
  */
 export async function routed<T>(r: {
   tag?: string;
   gemini: (models: string[]) => Promise<T>;
   cerebras?: (key: string, model: string) => Promise<T>;
+  claude?: (key: string, model: string) => Promise<T>;
+  /** Use the stronger Claude model (exam marking, markscheme drafting). */
+  claudeStrong?: boolean;
 }): Promise<T> {
   const s = await getSettings();
+  return claudeFirst(s, r, () => routedGemini(s, r));
+}
+
+async function routedGemini<T>(
+  s: Settings,
+  r: {
+    tag?: string;
+    gemini: (models: string[]) => Promise<T>;
+    cerebras?: (key: string, model: string) => Promise<T>;
+  },
+): Promise<T> {
   try {
     return await r.gemini(mainModels(s));
   } catch (e) {
@@ -327,6 +374,7 @@ export async function generateJson<T = Record<string, unknown>>(
     },
   };
   const cap = { left: CALL_CAP };
+  const strong = !!opts.geminiOnly || opts.thinking === "medium";
   const viaGemini = async (models: string[]): Promise<T> => {
     let data: Record<string, unknown> | null = null;
     for (let attempt = 0; attempt <= JSON_RETRIES && !data; attempt++) {
@@ -338,6 +386,8 @@ export async function generateJson<T = Record<string, unknown>>(
         await sleep(2000 * (attempt + 1));
       }
     }
+    const gt = geminiTokens(data!.usageMetadata as Record<string, unknown> | undefined);
+    if (gt) await recordTokens("gemini", opts.tag ?? "other", gt, strong);
     const { text, finish } = candidateText(data!);
     if (finish === "MAX_TOKENS")
       throw new GeminiError("The result was too long for the output limit. Ask for fewer items or a shorter length.");
@@ -352,7 +402,10 @@ export async function generateJson<T = Record<string, unknown>>(
   return routed({
     tag: opts.tag,
     gemini: viaGemini,
-    cerebras: textOnly ? (key, model) => cerebrasJson<T>(key, model, body, schema, opts.signal) : undefined,
+    cerebras: textOnly ? (key, model) => cerebrasJson<T>(key, model, body, schema, opts.signal, { tag: opts.tag ?? "other", strong }) : undefined,
+    // Claude takes text and photos; marking and medium-thinking work use the stronger model.
+    claude: claudeCanTake(body) ? (key, model) => claudeJson<T>(key, model, body, schema, opts.tag ?? "other", opts.signal, strong) : undefined,
+    claudeStrong: strong,
   });
 }
 
@@ -374,16 +427,37 @@ export async function generateText(
   if (opts.tools) body.tools = opts.tools;
   const models = mainModels(s).concat(liteModels(s));
   const cap = { left: CALL_CAP };
-  for (let attempt = 0; ; attempt++) {
-    const res = await send({ models, action: "generateContent", body, signal: opts.signal, tag: opts.tag, cap });
-    try {
-      return candidateText(await res.json());
-    } catch (e) {
-      if (e instanceof GeminiError) throw e;
-      if (attempt === JSON_RETRIES) throw new GeminiError("The connection to Gemini kept dropping. Try again in a moment.");
-      await sleep(2000 * (attempt + 1));
+  const viaGemini = async () => {
+    for (let attempt = 0; ; attempt++) {
+      const res = await send({ models, action: "generateContent", body, signal: opts.signal, tag: opts.tag, cap });
+      try {
+        const data = await res.json();
+        const gt = geminiTokens(data.usageMetadata);
+        if (gt) await recordTokens("gemini", opts.tag ?? "other", gt, opts.thinking === "medium");
+        return candidateText(data);
+      } catch (e) {
+        if (e instanceof GeminiError) throw e;
+        if (attempt === JSON_RETRIES) throw new GeminiError("The connection to Gemini kept dropping. Try again in a moment.");
+        await sleep(2000 * (attempt + 1));
+      }
     }
-  }
+  };
+  // url_context, transcripts and any other file/photo input stay on Gemini.
+  const plain = !opts.tools && !opts.parts?.length;
+  return claudeFirst(
+    s,
+    {
+      claude: plain ? (key, model) => claudeText(key, model, body, opts.tag ?? "other", opts.signal, opts.thinking === "medium") : undefined,
+      claudeStrong: opts.thinking === "medium",
+    },
+    viaGemini,
+  );
+}
+
+/** True when any message carries a photo or file (inlineData / fileData), which Cerebras can't read. */
+function hasMedia(body: Record<string, unknown>): boolean {
+  const contents = (body.contents as { parts?: Record<string, unknown>[] }[] | undefined) ?? [];
+  return contents.some((c) => (c.parts ?? []).some((p) => p.inlineData || p.fileData));
 }
 
 /** Stream a chat answer (SSE). Yields text pieces (thoughts skipped) and the final finish reason. */
@@ -395,14 +469,24 @@ export async function* streamGenerate(
   if (opts.thinking)
     body = { ...body, generationConfig: { ...(body.generationConfig as object), thinkingConfig: { thinkingLevel: opts.thinking } } };
   const cap = { left: CALL_CAP };
-  const opened = await routed<{ res: Response; cerebras: boolean }>({
+  const meta = { tag: opts.tag ?? "other", strong: opts.thinking === "medium" };
+  const opened = await routed<{ res: Response; who: "gemini" | "cerebras" | "claude" }>({
     tag: opts.tag,
     gemini: (models) =>
-      send({ models, action: "streamGenerateContent", params: { alt: "sse" }, body, signal, tag: opts.tag, cap }).then((res) => ({ res, cerebras: false })),
-    cerebras: (key, model) => cerebrasOpenStream(key, model, body, signal).then((res) => ({ res, cerebras: true })),
+      send({ models, action: "streamGenerateContent", params: { alt: "sse" }, body, signal, tag: opts.tag, cap }).then((res) => ({ res, who: "gemini" as const })),
+    // Cerebras is text only: a question with photos stays on Claude / Gemini.
+    cerebras: hasMedia(body) ? undefined : (key, model) => cerebrasOpenStream(key, model, body, signal).then((res) => ({ res, who: "cerebras" as const })),
+    claude: claudeCanTake(body)
+      ? (key, model) => claudeOpenStream(key, model, body, opts.tag ?? "other", signal).then((res) => ({ res, who: "claude" as const }))
+      : undefined,
+    claudeStrong: opts.thinking === "medium",
   });
-  if (opened.cerebras) {
-    yield* cerebrasStream(opened.res);
+  if (opened.who === "cerebras") {
+    yield* cerebrasStream(opened.res, meta);
+    return;
+  }
+  if (opened.who === "claude") {
+    yield* claudeStream(opened.res, meta);
     return;
   }
   const res = opened.res;
@@ -410,6 +494,7 @@ export async function* streamGenerate(
   const decoder = new TextDecoder();
   let buf = "";
   let finish: string | null = null;
+  let usage: Record<string, unknown> | undefined; // the last chunk carries the totals
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -420,6 +505,7 @@ export async function* streamGenerate(
       buf = buf.slice(idx + 1);
       if (!line.startsWith("data:")) continue;
       const data = JSON.parse(line.slice(5).trim());
+      if (data.usageMetadata) usage = data.usageMetadata;
       const block = data.promptFeedback?.blockReason;
       if (block) throw new GeminiError(`Gemini blocked this request (${block}).`);
       for (const cand of data.candidates ?? []) {
@@ -428,6 +514,8 @@ export async function* streamGenerate(
       }
     }
   }
+  const gt = geminiTokens(usage);
+  if (gt) await recordTokens("gemini", meta.tag, gt, meta.strong);
   yield { finish };
 }
 

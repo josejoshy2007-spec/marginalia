@@ -1,6 +1,6 @@
 /** Read-mode display blocks:  npx tsx scripts/reflow-test.mts */
 import assert from "node:assert/strict";
-import { buildBlocks, pageAt, shouldHandleFocus, type Block } from "../lib/reflow";
+import { buildBlocks, buildSections, markdownBlocks, pageAt, pageOfOffset, shouldHandleFocus, type Block } from "../lib/reflow";
 
 let passed = 0;
 const ok = (label: string) => (passed++, console.log(`✓ ${label}`));
@@ -130,6 +130,46 @@ function assertCovers(text: string, blocks: Block[]) {
   assert.equal(shouldHandleFocus(5, 5), false);
   assert.equal(shouldHandleFocus(6, 5), true);
   ok("a citation focus is handled once, new clicks still are");
+}
+
+// Per-page sections with AI readings appended after the extracted text: original offsets never move.
+{
+  const p1 = "Velocity is the rate of change of displacement.";
+  const p2 = "Acceleration is the rate of change of velocity.";
+  const orig = `${p1}\n\n${p2}`;
+  const pages = [
+    { page: 1, start: 0, end: p1.length },
+    { page: 2, start: p1.length + 2, end: orig.length },
+  ];
+  const reading = "Acceleration is $a = \\frac{\\Delta v}{\\Delta t}$.\n\n| q | unit |\n| --- | --- |\n| a | m/s2 |";
+  const text = `${orig}\n\n${reading}`;
+  const ai = [{ page: 2, start: orig.length + 2, end: text.length }];
+
+  const plain = buildSections(orig, pages);
+  const withAi = buildSections(text, pages, ai);
+  assert.equal(withAi.length, 2);
+  assert.deepEqual(
+    withAi.map((x) => x.original.map((b) => [b.start, b.end])),
+    plain.map((x) => x.original.map((b) => [b.start, b.end])),
+    "extracted blocks keep their offsets once readings are appended",
+  );
+  assert.equal(withAi[0].ai, null);
+  assert.equal(withAi[1].ai!.length, 2, "the reading splits into Markdown chunks at blank lines");
+  assert.equal(text.slice(withAi[1].ai![0].start, withAi[1].ai![0].end), "Acceleration is $a = \\frac{\\Delta v}{\\Delta t}$.");
+  assert.equal(text.slice(withAi[1].ai![1].start, withAi[1].ai![1].end), "| q | unit |\n| --- | --- |\n| a | m/s2 |");
+  assert.equal(pageOfOffset(pages, ai, ai[0].start + 3), 2);
+  assert.equal(pageOfOffset(pages, ai, 3), 1);
+  assert.deepEqual(markdownBlocks("a\n\n\nb", 0, 5), [
+    { kind: "para", start: 0, end: 1 },
+    { kind: "para", start: 4, end: 5 },
+  ]);
+  // Scanned PDF: pages without any text still get a section each.
+  const blank = buildSections("", [1, 2, 3].map((page) => ({ page, start: 0, end: 0 })));
+  assert.equal(blank.length, 3);
+  assert.ok(blank.every((x) => x.original.length === 0 && x.ai === null));
+  // No pages: one section, as before.
+  assert.equal(buildSections("Just text.", []).length, 1);
+  ok("AI readings: per-page sections, extracted offsets unchanged, scanned pages get sections");
 }
 
 console.log(`\n${passed} reflow checks passed`);

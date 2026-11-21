@@ -11,6 +11,10 @@ type Options = { detail?: string; confirmLabel?: string; danger?: boolean };
 type Request = Options & { message: string; resolve: (ok: boolean) => void };
 
 let show: ((r: Request) => void) | null = null;
+let dismiss: (() => boolean) | null = null;
+
+/** Close an open confirmation as "cancel" (used by the universal Back). True if one was open. */
+export const dismissConfirm = (): boolean => dismiss?.() ?? false;
 
 export function askConfirm(message: string, opts: Options = {}): Promise<boolean> {
   return new Promise((resolve) => {
@@ -28,6 +32,19 @@ export function ConfirmHost() {
     show = (r) => setReq(r);
     return () => {
       show = null;
+    };
+  }, []);
+  const reqRef = useRef(req);
+  reqRef.current = req;
+  useEffect(() => {
+    dismiss = () => {
+      if (!reqRef.current) return false;
+      reqRef.current.resolve(false);
+      setReq(null);
+      return true;
+    };
+    return () => {
+      dismiss = null;
     };
   }, []);
 

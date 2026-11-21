@@ -6,6 +6,7 @@
  * merged with reciprocal-rank fusion. Only the given (checked) sources are searched; an empty list
  * returns nothing, never "everything".
  */
+import { readingOrder, withoutSuperseded } from "./aipages";
 import { db, type ChunkRow, type Citation, type SourceRow } from "./db";
 import { embedQuery } from "./embedder";
 import { EMBED_DIM } from "./settings";
@@ -21,18 +22,23 @@ export function forgetSource(sourceId: number) {
   cache.delete(sourceId);
 }
 
-async function cached(sourceId: number): Promise<Cached> {
+/**
+ * The chunks the AI may see, in reading order (page, original before AI reading, ord). A page with an AI
+ * reading is represented by the reading alone: its original-text chunks stay stored but are left out here.
+ */
+async function cached(source: SourceRow): Promise<Cached> {
+  const sourceId = source.id!;
   let c = cache.get(sourceId);
   if (!c) {
-    const chunks = await db.chunks.where("source_id").equals(sourceId).sortBy("ord");
-    c = { chunks };
+    const all = await db.chunks.where("source_id").equals(sourceId).sortBy("ord");
+    c = { chunks: withoutSuperseded(all, source).sort(readingOrder(source.pages)) };
     cache.set(sourceId, c);
   }
   return c;
 }
 
-async function sourceChunks(sourceId: number): Promise<ChunkRow[]> {
-  return (await cached(sourceId)).chunks;
+async function sourceChunks(source: SourceRow): Promise<ChunkRow[]> {
+  return (await cached(source)).chunks;
 }
 
 async function readySources(subjectId: number, sourceIds: number[]): Promise<SourceRow[]> {
@@ -94,7 +100,7 @@ export async function retrieve(subjectId: number, sourceIds: number[], query: st
 
   const vector: Retrieved[] = [];
   const keyword: Retrieved[] = [];
-  const entries = await Promise.all(sources.map(async (source) => ({ source, c: await cached(source.id!) })));
+  const entries = await Promise.all(sources.map(async (source) => ({ source, c: await cached(source) })));
   const anyLocal = entries.some((e) => e.c.chunks.some(hasLocalVector));
   let q: Float32Array | null = null;
   if (anyLocal) {
@@ -154,7 +160,7 @@ export async function selectPassages(
   const perSource = Math.max(1, Math.floor(budget / sources.length));
   const picked: Retrieved[] = [];
   for (const source of sources) {
-    const chunks = await sourceChunks(source.id!);
+    const chunks = await sourceChunks(source);
     if (!chunks.length) continue;
     let chosen = chunks;
     if (chunks.length > perSource) {
@@ -179,11 +185,11 @@ export async function summaryPassages(
   if (!sourceIds.length) return [];
   if (focus?.trim()) {
     const hits = await retrieve(subjectId, sourceIds, focus, 30);
-    return hits.sort((a, b) => a.source.id! - b.source.id! || a.chunk.ord - b.chunk.ord);
+    return hits.sort((a, b) => a.source.id! - b.source.id! || readingOrder(a.source.pages)(a.chunk, b.chunk));
   }
   const out: Retrieved[] = [];
   for (const source of await readySources(subjectId, sourceIds)) {
-    for (const chunk of await sourceChunks(source.id!)) {
+    for (const chunk of await sourceChunks(source)) {
       if (pageFrom && (chunk.page_end ?? 0) < pageFrom) continue;
       if (pageTo && (chunk.page_start ?? Infinity) > pageTo) continue;
       out.push({ chunk, source, score: 0 });

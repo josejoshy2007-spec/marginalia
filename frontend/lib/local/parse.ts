@@ -8,7 +8,7 @@
 import type { PageSpan } from "./db";
 import { GeminiError, generateJson, generateText, patiently, uploadFile } from "./gemini";
 
-export type ParsedDoc = { title: string; text: string; pages: PageSpan[] };
+export type ParsedDoc = { title: string; text: string; pages: PageSpan[]; /** A PDF with no text layer (scanned): pages are blank until read with AI. */ noText?: boolean };
 export class ParseError extends Error {}
 type Progress = (f: number, stage: string) => void;
 
@@ -118,9 +118,10 @@ export async function parsePdf(file: Blob, onProgress?: Progress): Promise<Parse
   } catch {}
   await task.destroy();
   const text = parts.join("");
-  if (!text.trim()) throw new ParseError("No extractable text in this PDF (it may be scanned images).");
+  // No text at all: a scanned PDF. Keep it (blank pages) so its pages can be read with AI from Read mode.
+  const noText = !text.trim();
   // A placeholder title ("untitled", "Microsoft Word - …") is no title: the caller then keeps the file name.
-  return { title: isPlaceholderTitle(title) ? "Untitled PDF" : title, text, pages };
+  return { title: isPlaceholderTitle(title) ? "Untitled PDF" : title, text: noText ? "" : text, pages: noText ? pages.map((p) => ({ ...p, start: 0, end: 0 })) : pages, ...(noText ? { noText: true } : {}) };
 }
 
 // ---------------------------------------------------------------- web pages
@@ -206,8 +207,9 @@ function mediaDuration(blob: Blob): Promise<number> {
   });
 }
 
-function geminiMime(blob: Blob, filename: string): string {
-  const t = (blob.type || "").split(";")[0];
+/** Base MIME type for Gemini: codec parameters stripped, webm audio sent as (sound-only) video. */
+export function geminiMime(blob: Blob, filename: string): string {
+  const t = (blob.type || "").split(";")[0].trim().toLowerCase();
   if (t === "audio/webm") return "video/webm"; // Gemini reads webm as a (sound-only) video
   if (t === "audio/x-m4a" || t === "audio/m4a") return "audio/mp4";
   if (t) return t;

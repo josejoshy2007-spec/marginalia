@@ -15,6 +15,7 @@ import type {
   IBOptions,
   MarkResult,
   QuizResult,
+  PageReadStatus,
   Source,
   SourceDetail,
   StreamEvent,
@@ -37,16 +38,19 @@ import {
 import { GeminiError, patiently, speak, streamGenerate } from "./gemini";
 import { embedPassages, resetWorker, whenIdle } from "./embedder";
 import * as ib from "./ib";
-import { parseText, parseUrl, parsePdf, pdfPageCount, ParseError, transcribeRecording, transcribeYoutube, YOUTUBE_RE } from "./parse";
+import { parseText, parseUrl, parsePdf, openPdf, pdfPageCount, ParseError, transcribeRecording, transcribeYoutube, YOUTUBE_RE } from "./parse";
 import { citation, forgetSource, passageBlock, retrieve, selectPassages, summaryPassages, type Retrieved } from "./search";
 import { EMBED_DIM, getSettings } from "./settings";
 import { preview, schedule, type Grade } from "./srs";
 import { buildSummary, SUMMARY_FORMATS, SUMMARY_LENGTH } from "./summarize";
-import { readAnswer, readQuestion, readQuizAnswers } from "./vision";
+import { blobToBase64, readAnswer, readQuestion, readQuizAnswers, transcribeVoice } from "./vision";
+import { makeThumb } from "../photos";
 import { exportAll, importAll } from "./backup";
 import type { Thread } from "../threads";
 import type { ThreadRow } from "./db";
 import { formatOf, unsupportedReason } from "./formats";
+import { applyAiReading, indexSpans } from "./aipages";
+import { readPageImage, renderPageJpeg } from "./pageread";
 
 // ---------------------------------------------------------------- jobs
 
@@ -149,8 +153,17 @@ async function sourceOut(s: SourceRow): Promise<Source> {
     stage: p?.stage ?? null,
     error: s.error ?? null,
     can_retry: canRetry,
+    ...(s.no_text_layer ? { no_text_layer: true } : {}),
+    ...(s.ai_pages?.length ? { ai_page_count: s.ai_pages.length } : {}),
     ...(s.status === "ready" ? { search_progress: await searchProgress(s.id!) } : {}),
   };
+}
+
+function cleanCard(input: { front: string; back: string }) {
+  const front = String(input.front ?? "").trim();
+  const back = String(input.back ?? "").trim();
+  if (!front || !back) throw new Error("A card needs both a front and a back.");
+  return { front, back };
 }
 
 function cardOut(c: CardRow, t = Date.now()): CardItem {
@@ -319,7 +332,7 @@ function fillBatchWorked() {
  * vectors (keyword search works at once); reembedStale() fills the vectors in the background afterwards.
  */
 async function indexSource(src: SourceRow, report: (f: number, stage: string) => void) {
-  const spans = chunkText(src.text, 800, 120, src.pages);
+  const spans = indexSpans(src); // chunks of the text, plus any AI page readings appended to it
   let done = await db.chunks.where("source_id").equals(src.id!).count();
   if (done > spans.length) {
     await db.chunks.where("source_id").equals(src.id!).delete();
@@ -424,7 +437,7 @@ function submitSource(id: number) {
         }
         // PDFs keep their own title if they have one; photos get Gemini's topic title; other files keep the file name.
         const title = (src.kind === "pdf" && doc.title !== "Untitled PDF") || src.kind === "image" ? doc.title : src.title;
-        await db.sources.update(id, { text: doc.text, pages: doc.pages, title: title.slice(0, 500) });
+        await db.sources.update(id, { text: doc.text, pages: doc.pages, title: title.slice(0, 500), ...(doc.noText ? { no_text_layer: true } : {}) });
         src = (await db.sources.get(id))!;
       }
       await indexSource(src, (f, s) => report(share + f * (1 - share), s));
@@ -501,6 +514,91 @@ async function deleteSourceRows(id: number) {
   forgetStats(id);
 }
 
+// ---------------------------------------------------------------- "Read this page with AI"
+
+/** Most pages one "Read pages..." run takes (each page is one vision call). */
+export const MAX_AI_PAGES_PER_RUN = 30;
+
+type PageReadJob = PageReadStatus & { replace: boolean };
+
+/** In memory only: a run interrupted by closing the app is simply started again. */
+const pageReads = new Map<number, PageReadJob>();
+/** Test seams: the PDF reader, page renderer and vision call can be replaced (Node has no canvas or Gemini). */
+const pageReadHooks: {
+  open?: (blob: Blob) => Promise<{ doc: any; task: { destroy: () => Promise<void> } }>;
+  render?: (doc: any, page: number) => Promise<Blob>;
+  read?: (jpeg: Blob) => Promise<string>;
+} = {};
+
+const pageReadChanged = (sourceId: number) => {
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("marginalia:page-read", { detail: { sourceId } }));
+};
+const pageReadOut = (j: PageReadJob | undefined): PageReadStatus | null =>
+  j ? { state: j.state, pending: [...j.pending], total: j.total, done: j.done, stage: j.stage, error: j.error } : null;
+
+/** Append one page's AI reading to the source and make it searchable. */
+async function storeAiReading(sourceId: number, page: number, reading: string) {
+  const res = await applyAiReading(sourceId, page, reading);
+  forgetSource(sourceId);
+  forgetStats(sourceId);
+  return res;
+}
+
+function startPageRead(sourceId: number, pages: number[], replace: boolean): PageReadStatus {
+  if (pageReads.get(sourceId)?.state === "running") throw new Error("Pages of this source are already being read.");
+  const job: PageReadJob = { state: "running", pending: pages, total: pages.length, done: 0, stage: "Queued", error: null, replace };
+  pageReads.set(sourceId, job);
+  pageReadChanged(sourceId);
+  genQueue.push(async () => {
+    let task: { destroy: () => Promise<void> } | null = null;
+    try {
+      const blob = (await db.blobs.get(pdfKey(sourceId)))?.blob;
+      if (!blob) throw new Error("This device doesn't have the original PDF. Attach it in Page view first.");
+      const opened = await (pageReadHooks.open ?? openPdf)(blob);
+      task = opened.task;
+      let first = true;
+      while (job.pending.length) {
+        const page = job.pending[0];
+        const src = await db.sources.get(sourceId);
+        if (!src) break; // deleted meanwhile
+        if (!job.replace && src.ai_pages?.some((p) => p.page === page)) {
+          job.pending.shift();
+          job.done++;
+          continue;
+        }
+        if (!first) await new Promise((r) => setTimeout(r, pageReadHooks.render ? 0 : 1500)); // a breath between pages; the AI pacer does the rest
+        first = false;
+        job.stage = `Reading page ${page} (${job.done + 1}/${job.total})`;
+        pageReadChanged(sourceId);
+        const jpeg = await (pageReadHooks.render ?? renderPageJpeg)(opened.doc, page);
+        const reading = await patiently(() => (pageReadHooks.read ?? readPageImage)(jpeg), 2, () => {
+          job.stage = "Waiting for the AI's per-minute limit";
+          pageReadChanged(sourceId);
+        });
+        if (!(await db.sources.get(sourceId))) break;
+        await storeAiReading(sourceId, page, reading);
+        job.pending.shift();
+        job.done++;
+        pageReadChanged(sourceId);
+      }
+      job.state = "done";
+      job.stage = "Done";
+    } catch (e) {
+      job.state = "failed";
+      job.error = message(e);
+      job.stage = "Stopped";
+    } finally {
+      try {
+        await task?.destroy();
+      } catch {}
+      pageReadChanged(sourceId);
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("marginalia:library-changed")); // the source list (chunk and character counts) refreshes
+      void reembedStale(); // vectors for the new passages, in the background
+    }
+  });
+  return pageReadOut(job)!;
+}
+
 // ---------------------------------------------------------------- generation
 
 const PASSAGE_BUDGET: Record<string, number> = { deck: 20, quiz: 14, sheet: 24, episode: 18, exam: 24 };
@@ -557,7 +655,10 @@ async function plan(subjectId: number, req: GenerateRequest): Promise<Plan> {
         return buildSheet(passages, subtype, focus, o);
       case "exam":
         r(0.1, "Writing questions and markschemes");
-        return buildExam(passages, subtype, req.extended ?? true, focus, label, ctx);
+        return buildExam(passages, subtype, req.extended ?? true, focus, label, ctx, {
+          style: req.style, course: subject.ib_course, level: subject.ib_level, calculator: req.calculator,
+          paper: req.paper, language: req.language,
+        });
       default:
         r(0.1, "Writing the script");
         return buildEpisode(passages, subtype, req.length ?? "medium", focus, o);
@@ -628,6 +729,27 @@ const GENERAL_SYSTEM = `You are a patient, knowledgeable tutor helping a student
 Be accurate and say when something is uncertain, debated, or depends on the syllabus or teacher. For problems, show the steps. Prefer explaining and checking understanding over just giving answers; for homework-style tasks, guide the student to the answer.
 
 Write clearly and compactly: short paragraphs or flat lists, light Markdown (bold, italics, headings) is fine. Write maths in LaTeX: $…$ inline and $$…$$ for display equations, with units and words outside the maths. Write money as "5 dollars" or "USD 5", never "$5".`;
+
+/** Added to either system prompt when the question carries photos. */
+const PHOTO_NOTE = `
+
+The student may attach photos of a problem, a diagram or their own working. Read them carefully (say so if something is illegible), and still ground factual claims in the passages, with citations, when passages are given.`;
+
+const MAX_ASK_IMAGES = 4;
+const askImageKey = (id: string) => `askimg-${id}`;
+
+/** Save full-size photos to the blob store (key `askimg-<id>`) and return ids plus small thumbnails for the thread. */
+async function saveAskImages(files: Blob[]): Promise<{ id: string; thumb: string }[]> {
+  if (files.length > MAX_ASK_IMAGES) throw new GeminiError(`Up to ${MAX_ASK_IMAGES} photos per question.`);
+  const out: { id: string; thumb: string }[] = [];
+  for (const f of files) {
+    if (f.size > 10 * 1024 * 1024) throw new GeminiError("Each photo must be under 10 MB.");
+    const id = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+    await db.blobs.put({ key: askImageKey(id), blob: f, name: "photo" });
+    out.push({ id, thumb: await makeThumb(f) });
+  }
+  return out;
+}
 
 const MARKER = /\[(\d{1,3}(?:\s*[,;]\s*\d{1,3})*)\]/g;
 const PARTIAL = /\[[\d,;\s]{0,20}$/;
@@ -725,6 +847,8 @@ async function saveAnswer(key: string, events: StreamEvent[]) {
   } catch {}
 }
 
+const hasHistoryImages = (contents: Rec[]) => contents.some((c) => (c.parts ?? []).some((p: Rec) => p.inlineData));
+
 export async function streamChat(
   subjectId: number,
   payload: ChatPayload,
@@ -740,7 +864,9 @@ export async function streamChat(
   if (payload.selection && !ids.includes(payload.selection.source_id)) ids.push(payload.selection.source_id);
   const firstTurn = !(payload.history ?? []).some((t) => t.content.trim());
   let cacheKey: string | null = null;
-  if (firstTurn && payload.message.trim()) {
+  // A question with photos is never cached or replayed: the cache key doesn't cover the image bytes.
+  const imageIds = (payload.images ?? []).slice(0, MAX_ASK_IMAGES);
+  if (firstTurn && payload.message.trim() && !imageIds.length) {
     try {
       cacheKey = await answerKey(subjectId, subject, payload, ids);
       // A retry ("Try again") must ask the AI again, never replay the saved answer.
@@ -782,21 +908,53 @@ ${topic.query}` : query, s.retrievalK);
     return;
   }
   const contents: Rec[] = [];
-  for (const t of payload.history ?? []) {
+  // Earlier photos go back to the AI too (most recent MAX_ASK_IMAGES across the conversation, this turn's included),
+  // so a follow-up about "the photo" still has it. A missing blob in history is skipped silently.
+  const history = payload.history ?? [];
+  let historyBudget = Math.max(0, MAX_ASK_IMAGES - imageIds.length);
+  const keepHistory = new Map<number, string[]>();
+  for (let i = history.length - 1; i >= 0 && historyBudget > 0; i--) {
+    const ids = history[i].role === "user" ? (history[i].images ?? []) : [];
+    if (!ids.length) continue;
+    const take = ids.slice(-historyBudget);
+    keepHistory.set(i, take);
+    historyBudget -= take.length;
+  }
+  for (let i = 0; i < history.length; i++) {
+    const t = history[i];
     if (!t.content.trim()) continue;
     const role = t.role === "assistant" ? "model" : "user";
     if (!contents.length && role !== "user") continue;
-    contents.push({ role, parts: [{ text: t.content }] });
+    const parts: Rec[] = [];
+    for (const id of keepHistory.get(i) ?? []) {
+      try {
+        const r = await db.blobs.get(askImageKey(id));
+        if (r) parts.push({ inlineData: { mimeType: r.blob.type.startsWith("image/") ? r.blob.type : "image/jpeg", data: await blobToBase64(r.blob) } });
+      } catch {}
+    }
+    contents.push({ role, parts: [...parts, { text: t.content }] });
   }
   const question = payload.selection
     ? `I highlighted this passage:\n<highlight>\n${payload.selection.text}\n</highlight>\n\n${payload.message}`
     : payload.message;
+  const imageParts: Rec[] = [];
+  if (imageIds.length) {
+    const rows = await db.blobs.bulkGet(imageIds.map(askImageKey));
+    if (rows.some((r) => !r)) {
+      onEvent({ type: "error", message: "A photo on this question is no longer stored on this device (it may have come from another device). Attach it again." });
+      return;
+    }
+    for (const r of rows) imageParts.push({ inlineData: { mimeType: r!.blob.type.startsWith("image/") ? r!.blob.type : "image/jpeg", data: await blobToBase64(r!.blob) } });
+  }
   contents.push({
     role: "user",
-    parts: [{ text: general ? question : "Passages:\n\n" + hits.map((r, i) => passageBlock(i + 1, r)).join("\n\n") + "\n\n" + question }],
+    parts: [
+      ...imageParts,
+      { text: general ? question : "Passages:\n\n" + hits.map((r, i) => passageBlock(i + 1, r)).join("\n\n") + "\n\n" + question },
+    ],
   });
   const body = {
-    systemInstruction: { parts: [{ text: (general ? GENERAL_SYSTEM : SYSTEM) + ib.context(subject) }] },
+    systemInstruction: { parts: [{ text: (general ? GENERAL_SYSTEM : SYSTEM) + (imageParts.length || hasHistoryImages(contents) ? PHOTO_NOTE : "") + ib.context(subject) }] },
     contents,
     generationConfig: { maxOutputTokens: s.maxTokens },
   };
@@ -960,7 +1118,12 @@ export const localApi = {
     if (!cur) return;
     await tombstone("threads", [uid]);
     await db.threads.delete(cur.id!);
+    // The full-size photos of its questions go with it.
+    const imgs = (cur.turns as Thread["turns"]).flatMap((t) => (t.role === "user" ? (t.images ?? []).map((i) => askImageKey(i.id)) : []));
+    if (imgs.length) await db.blobs.bulkDelete(imgs);
   },
+  saveAskImages,
+  transcribeVoice,
 
   sources: async (subjectId: number): Promise<Source[]> => {
     await boot();
@@ -969,7 +1132,40 @@ export const localApi = {
   },
   source: async (id: number): Promise<SourceDetail> => {
     const s = await need(db.sources.get(id), "Source not found");
-    return { ...(await sourceOut(s)), text: s.text, pages: s.pages };
+    return { ...(await sourceOut(s)), text: s.text, pages: s.pages, ai_pages: s.ai_pages ?? [] };
+  },
+  /** Is the original PDF on this device? (Needed to read pages with AI.) */
+  hasPdf: async (id: number): Promise<boolean> => !!(await db.blobs.get(pdfKey(id))),
+  /**
+   * Read PDF pages with AI (background job, one vision call per page): `from..to`, at most 30 per run.
+   * `replace` re-reads pages that already have a reading (the single-page action); a range skips them.
+   */
+  readPagesWithAI: async (id: number, from: number, to: number = from, opts: { replace?: boolean } = {}): Promise<PageReadStatus> => {
+    const src = await need(db.sources.get(id), "Source not found");
+    if (src.kind !== "pdf") throw new Error("Only PDFs can be read page by page.");
+    if (src.status !== "ready") throw new Error("Wait until the source is ready");
+    if (!(await db.blobs.get(pdfKey(id)))) throw new Error("This device doesn't have the original PDF. Attach it in Page view first.");
+    const a = Math.max(1, Math.min(from, to));
+    const b = Math.min(src.pages.length, Math.max(from, to));
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a > b) throw new Error(`Pick pages between 1 and ${src.pages.length}.`);
+    if (b - a + 1 > MAX_AI_PAGES_PER_RUN) throw new Error(`Up to ${MAX_AI_PAGES_PER_RUN} pages at a time.`);
+    return startPageRead(id, Array.from({ length: b - a + 1 }, (_, i) => a + i), opts.replace ?? a === b);
+  },
+  /** Progress of the latest page-reading run for a source (null if none since the app opened). */
+  pageReadStatus: async (id: number): Promise<PageReadStatus | null> => pageReadOut(pageReads.get(id)),
+  /** Try again after a failed run: only the pages not yet read. */
+  retryPageRead: async (id: number): Promise<PageReadStatus> => {
+    const j = pageReads.get(id);
+    if (!j || j.state !== "failed" || !j.pending.length) throw new Error("Nothing to retry.");
+    return startPageRead(id, [...j.pending], j.replace);
+  },
+  /** Test seams for the page-reading job and its storage step. */
+  _pageRead: {
+    hooks: pageReadHooks,
+    store: storeAiReading,
+    wait: async (id: number) => {
+      while (pageReads.get(id)?.state === "running") await new Promise((r) => setTimeout(r, 10));
+    },
   },
   addText: async (subjectId: number, title: string, text: string) => addParsed(subjectId, "text", parseText(text, title || null)),
   addUrl: async (subjectId: number, raw: string) => {
@@ -1074,6 +1270,31 @@ export const localApi = {
     await db.cards.update(cardId, upd);
     return cardOut({ ...c, ...upd }, t);
   },
+  /** A card the student writes: no citation, new and due now. */
+  addCard: async (deckId: number, input: { front: string; back: string }): Promise<CardItem> => {
+    const { front, back } = cleanCard(input);
+    const deck = await need(db.artifacts.get(deckId), "Deck not found");
+    if (deck.kind !== "deck") throw new Error("Cards can only be added to a recall deck.");
+    const row: CardRow = {
+      deck_id: deckId, front, back, cite: [],
+      ease: 2.5, interval_days: 0, reps: 0, lapses: 0, due_at: now(), last_reviewed_at: null,
+    };
+    const id = await db.cards.add(row);
+    return cardOut({ ...row, id });
+  },
+  /** Change the text only; the schedule (ease, interval, reps, due date) is untouched. */
+  updateCard: async (cardId: number, input: { front: string; back: string }): Promise<CardItem> => {
+    const { front, back } = cleanCard(input);
+    const c = await need(db.cards.get(cardId), "Card not found");
+    await db.cards.update(cardId, { front, back });
+    return cardOut({ ...c, front, back });
+  },
+  deleteCard: async (cardId: number): Promise<void> => {
+    const c = await db.cards.get(cardId);
+    if (!c) return;
+    await tombstone("cards", [c.uid]);
+    await db.cards.delete(cardId);
+  },
   resetDeck: async (deckId: number): Promise<void> => {
     const t = now();
     await db.cards.where("deck_id").equals(deckId).modify({ ease: 2.5, interval_days: 0, reps: 0, lapses: 0, due_at: t, last_reviewed_at: null });
@@ -1100,17 +1321,18 @@ export const localApi = {
     const qs: Rec[] = (art.content as Rec).questions ?? [];
     if (qi < 0 || qi >= qs.length) throw new Error("No such question");
     if (!answer.trim()) throw new Error("Write an answer first.");
-    const result = await markAnswer(qs[qi], answer, ib.courseLabel(await db.subjects.get(art.subject_id)));
+    const subj = await db.subjects.get(art.subject_id);
+    const result = await markAnswer(qs[qi], answer, ib.courseLabel(subj), subj?.ib_course);
     await db.attempts.add({ quiz_id: examId, answers: [{ q: qi, answer, result }], score: result.marks_awarded, total: result.max_marks, created_at: now() });
     return result;
   },
-  customQuestion: async (subjectId: number, body: { question: string; marks: number; answer: string; source_ids: number[] }): Promise<ArtifactDetail> => {
+  customQuestion: async (subjectId: number, body: { question: string; marks: number; answer: string; source_ids: number[]; calculator?: "allowed" | "none"; paper?: string }): Promise<ArtifactDetail> => {
     const subject = await need(db.subjects.get(subjectId), "Subject not found");
     const label = ib.courseLabel(subject);
     const passages = await retrieve(subjectId, body.source_ids, body.question, 10);
     if (!passages.length) throw new Error("Check at least one source with text in the Library first.");
-    const content = await draftMarkscheme(passages, body.question, body.marks, label, ib.context(subject));
-    const result = body.answer.trim() ? await markAnswer(content.questions[0], body.answer, label) : null;
+    const content = await draftMarkscheme(passages, body.question, body.marks, label, ib.context(subject), { course: subject.ib_course, calculator: body.calculator, paper: body.paper });
+    const result = body.answer.trim() ? await markAnswer(content.questions[0], body.answer, label, subject.ib_course) : null;
     const { title, ...rest } = content;
     const id = await db.artifacts.add({
       subject_id: subjectId, kind: "exam", subtype: "custom", title, params: { source_ids: body.source_ids },

@@ -1,26 +1,10 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, type RefObject } from "react";
 import { RetryLink } from "./study/shared";
 import { CameraIcon } from "./icons";
 import { isNative, nativePhoto } from "@/lib/native";
-
-/** Downscale a phone photo to ≤1800 px JPEG before upload (falls back to the original, e.g. HEIC). */
-async function shrink(file: File): Promise<File> {
-  try {
-    const bitmap = await createImageBitmap(file);
-    const scale = Math.min(1, 1800 / Math.max(bitmap.width, bitmap.height));
-    if (scale === 1 && file.size < 1.5 * 1024 * 1024) return file;
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round(bitmap.width * scale);
-    canvas.height = Math.round(bitmap.height * scale);
-    canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/jpeg", 0.85));
-    return blob ? new File([blob], file.name.replace(/\.\w+$/, "") + ".jpg", { type: "image/jpeg" }) : file;
-  } catch {
-    return file;
-  }
-}
+import { shrink, usePasteImages } from "@/lib/photos";
 
 /**
  * "Take/choose a photo" button. On phones it offers the camera or the gallery; several photos can
@@ -31,11 +15,14 @@ export default function PhotoButton({
   busyLabel = "Reading your handwriting…",
   onPhotos,
   disabled,
+  pasteScope,
 }: {
   label: string;
   busyLabel?: string;
   onPhotos: (files: File[]) => Promise<void>;
   disabled?: boolean;
+  /** Pasting an image inside this element (e.g. the answer box) is read like a picked photo. */
+  pasteScope?: RefObject<HTMLElement | null>;
 }) {
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
@@ -54,8 +41,18 @@ export default function PhotoButton({
     }
   };
 
+  // Pasting while this control is focused always works; `pasteScope` widens it to an answer area.
+  const self = useRef<HTMLSpanElement>(null);
+  const onPaste = (files: File[]) => {
+    if (disabled || busy) return;
+    void Promise.all(files.slice(0, 6).map(shrink)).then(read);
+  };
+  usePasteImages(self, onPaste);
+  usePasteImages(pasteScope ?? self, onPaste, !!pasteScope);
+
   return (
-    <span className="inline-flex flex-col">
+    <span ref={self} className="inline-flex flex-col">
+      <span className="inline-flex items-center gap-2">
       <button
         type="button"
         disabled={disabled || busy}
@@ -71,6 +68,8 @@ export default function PhotoButton({
         <CameraIcon width={16} height={16} />
         {busy ? busyLabel : label}
       </button>
+      {!busy && <span className="text-xs text-muted">or paste a screenshot</span>}
+      </span>
       <input
         ref={input}
         type="file"

@@ -5,7 +5,15 @@
  *   library.json.gz          every subject, ready source (metadata), ready study item, card and
  *                            attempt, plus tombstones; rows refer to each other by `uid`
  *   source-<uid>.json.gz     one per source: its text, pages and indexed chunks with embeddings
- *                            (written once; a source's text never changes)
+ *                            (written once). A source's text only ever changes by APPENDING "Read this
+ *                            page with AI" readings, which bumps its `content_rev`; the content is then
+ *                            re-uploaded as source-<uid>.r<rev>.json.gz (rev 0 keeps the plain name), the
+ *                            library row carries the rev, and other devices that are behind download the
+ *                            new file and adopt it (unchanged chunks keep their ids, so citations hold).
+ *                            A rev is per device, so each revision also has a random `content_tag` (file name
+ *                            source-<uid>.r<rev>-<tag>.json.gz): the same rev with another tag is different
+ *                            content. The higher (rev, tag) wins; a device whose own readings are missing from
+ *                            the winner adopts it, re-applies those readings on top, and uploads rev+1.
  *
  * A sync downloads library.json, merges it with this device (per row, the newer `updated_at` wins;
  * a tombstone always wins; rows whose parent is gone are dropped), applies the result here
@@ -15,6 +23,7 @@
  * generated stay on their device until they're ready.
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { applyAiReading, newContentTag } from "./aipages";
 import { db, now, syncState, SYNCED_TABLES, type SyncedTable, type TombstoneRow } from "./db";
 import { googleDrive, type Drive, type DriveFile } from "./drive";
 import { AuthNeeded, driveToken } from "./google";
@@ -26,7 +35,17 @@ type Rec = Record<string, any> & { uid: string; updated_at: string };
 export type Library = { format: 1; synced_at: string } & Record<SyncedTable, Rec[]> & { tombstones: TombstoneRow[] };
 
 const LIBRARY = "library.json.gz";
-const contentName = (uid: string) => `source-${uid}.json.gz`;
+const contentName = (uid: string, rev = 0, tag = "") =>
+  rev > 0 ? `source-${uid}.r${rev}${tag ? `-${tag}` : ""}.json.gz` : `source-${uid}.json.gz`;
+/** uid, revision and tag ("" for files from before tags) of a content file name, or null for other files. */
+const parseContentName = (name: string): { uid: string; rev: number; tag: string } | null => {
+  const m = /^source-(.+?)(?:\.r(\d+)(?:-([a-z0-9]+))?)?\.json\.gz$/.exec(name);
+  return m ? { uid: m[1], rev: m[2] ? Number(m[2]) : 0, tag: m[3] ?? "" } : null;
+};
+/** Order of content revisions: higher rev wins, an equal rev is settled by the tag (the same on every device). */
+const cmpContent = (a: { rev: number; tag: string }, b: { rev: number; tag: string }) =>
+  a.rev - b.rev || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0);
+const contentOf = (r: Record<string, any>) => ({ rev: (r.content_rev as number) ?? 0, tag: (r.content_tag as string) ?? "" });
 
 // ---------------------------------------------------------------- local snapshot (uid references)
 
@@ -57,7 +76,7 @@ export async function snapshotLocal(): Promise<Library> {
     subjects: subjects.map((s) => strip(s) as Rec),
     sources: sources
       .filter((s) => subjectUid.has(s.subject_id))
-      .map(({ text: _t, pages, subject_id, error: _e, ...s }) => ({
+      .map(({ text: _t, pages, subject_id, error: _e, ai_pages: _a, ...s }) => ({
         ...strip(s), subject: subjectUid.get(subject_id), page_count: pages.length,
       }) as Rec),
     artifacts: artifacts
@@ -109,6 +128,21 @@ export function merge(a: Library, b: Library | null): Library {
       const prev = rows.get(r.uid);
       if (!prev || prev.updated_at < r.updated_at) rows.set(r.uid, r);
     }
+    if (table === "sources") {
+      // A source's content revision only moves forward, whichever row is newer (a later tick of "checked" must not undo it).
+      const top = new Map<string, { rev: number; tag: string }>();
+      for (const r of [...(a.sources ?? []), ...(b.sources ?? [])]) {
+        const c = contentOf(r);
+        const prev = top.get(r.uid);
+        if (!prev || cmpContent(c, prev) > 0) top.set(r.uid, c);
+      }
+      for (const [uid, row] of rows) {
+        const best = top.get(uid)!;
+        if (cmpContent(contentOf(row), best) === 0) continue;
+        const { content_tag: _t, ...rest } = row;
+        rows.set(uid, { ...rest, content_rev: best.rev, ...(best.tag ? { content_tag: best.tag } : {}) } as Rec);
+      }
+    }
     out[table] = [...rows.values()];
   }
   // Drop rows whose parent is gone (in dependency order: subjects → sources/artifacts → cards/attempts).
@@ -138,20 +172,75 @@ const unb64 = (s: string) => {
 type Content = {
   text: string;
   pages: { page: number; start: number; end: number }[];
+  ai_pages?: { page: number; start: number; end: number }[];
+  no_text_layer?: boolean;
   chunks: { ord: number; text: string; char_start: number; char_end: number; page_start: number | null; page_end: number | null; token_count: number; e: string }[];
 };
 
-async function sourceContent(id: number): Promise<Content> {
-  const s = (await db.sources.get(id))!;
-  const chunks = await db.chunks.where("source_id").equals(id).sortBy("ord");
-  return {
+async function sourceContent(id: number): Promise<{ content: Content; rev: number; tag: string }> {
+  // One read transaction: the row, its chunks and the revision/tag used for the file name are one snapshot.
+  const { s, chunks } = await db.transaction("r", db.sources, db.chunks, async () => ({
+    s: (await db.sources.get(id))!,
+    chunks: await db.chunks.where("source_id").equals(id).sortBy("ord"),
+  }));
+  const content: Content = {
     text: s.text,
     pages: s.pages,
+    ...(s.ai_pages?.length ? { ai_pages: s.ai_pages } : {}),
+    ...(s.no_text_layer ? { no_text_layer: true } : {}),
     chunks: chunks.map((c) => ({
       ord: c.ord, text: c.text, char_start: c.char_start, char_end: c.char_end,
       page_start: c.page_start, page_end: c.page_end, token_count: c.token_count, e: b64(c.embedding),
     })),
   };
+  return { content, rev: s.content_rev ?? 0, tag: s.content_tag ?? "" };
+}
+
+/**
+ * Another device added AI page readings: take its text, pages and chunks, in ONE transaction (so the chunk
+ * invariant holds whatever else runs). Chunks that are identical here (same ord, span and text) are kept as
+ * they are, so citations and vectors pointing at them survive. Readings this device has that the adopted
+ * content lacks (a page read on both devices before they synced) are re-applied on top, append-only, and the
+ * result gets a revision past both, so the other device picks them up on its next sync.
+ * Returns false when nothing was adopted (already as new, or this source is being read right now).
+ */
+async function adoptContent(sourceId: number, subjectId: number, content: Content, rev: number, tag: string, updatedAt: string): Promise<boolean> {
+  // A page-reading run is appending to this source: leave it for the next sync.
+  if ((await localApi.pageReadStatus(sourceId))?.state === "running") return false;
+  return db.transaction("rw", db.sources, db.chunks, async () => {
+    const cur = await db.sources.get(sourceId);
+    if (!cur || cmpContent(contentOf(cur), { rev, tag }) >= 0) return false;
+    const local = await db.chunks.where("source_id").equals(sourceId).toArray();
+    const remote = new Map(content.chunks.map((c) => [c.ord, c]));
+    const remotePages = new Set((content.ai_pages ?? []).map((p) => p.page));
+    const mine = (cur.ai_pages ?? []).filter((p) => !remotePages.has(p.page)).map((p) => ({ page: p.page, text: cur.text.slice(p.start, p.end) }));
+    const kept = new Set<number>();
+    const drop: number[] = [];
+    for (const c of local) {
+      const r = remote.get(c.ord);
+      if (r && r.char_start === c.char_start && r.char_end === c.char_end && r.text === c.text) kept.add(c.ord);
+      else drop.push(c.id!);
+    }
+    await db.chunks.bulkDelete(drop);
+    await db.chunks.bulkAdd(
+      content.chunks
+        .filter((c) => !kept.has(c.ord))
+        .map((c) => ({
+          source_id: sourceId, subject_id: subjectId, ord: c.ord, text: c.text, char_start: c.char_start, char_end: c.char_end,
+          page_start: c.page_start, page_end: c.page_end, token_count: c.token_count, embedding: unb64(c.e),
+        })),
+    );
+    await db.sources.update(sourceId, {
+      text: content.text, pages: content.pages, ai_pages: content.ai_pages ?? [], content_rev: rev, content_tag: tag,
+      no_text_layer: content.no_text_layer ?? false, updated_at: updatedAt,
+    });
+    if (mine.length) {
+      for (const m of mine) await applyAiReading(sourceId, m.page, m.text); // fresh ords above the adopted ones
+      // A revision past both sides, with its own tag, so it is uploaded and then adopted by the other device.
+      await db.sources.update(sourceId, { content_rev: Math.max(rev, cur.content_rev ?? 0) + 1, content_tag: newContentTag() });
+    }
+    return true;
+  });
 }
 
 const uidMap = async (table: SyncedTable) =>
@@ -160,7 +249,7 @@ const uidMap = async (table: SyncedTable) =>
 export type ApplyResult = { added: number; updated: number; removed: number; missing: string[] };
 
 /** Make this device match `lib`. `fetchContent` returns a source's content file (null if absent). */
-export async function applyLibrary(lib: Library, local: Library, fetchContent: (uid: string) => Promise<Content | null>): Promise<ApplyResult> {
+export async function applyLibrary(lib: Library, local: Library, fetchContent: (uid: string, rev: number, tag: string) => Promise<Content | null>): Promise<ApplyResult> {
   const res: ApplyResult = { added: 0, updated: 0, removed: 0, missing: [] };
   syncState.applying = true;
   try {
@@ -183,19 +272,31 @@ export async function applyLibrary(lib: Library, local: Library, fetchContent: (
       const cur = sources.get(r.uid);
       const subject = subjects.get(r.subject);
       if (!subject) continue;
+      const { rev, tag } = contentOf(r);
       const meta = { uid: r.uid, updated_at: r.updated_at, subject_id: subject.id, kind: r.kind, title: r.title, url: r.url ?? null, checked: r.checked ?? true, created_at: r.created_at };
       if (cur) {
+        // AI page readings added on another device: adopt that revision's content (kept if its file isn't there yet).
+        if (cmpContent({ rev, tag }, contentOf(cur)) > 0 && cur.status === "ready") {
+          const content = await fetchContent(r.uid, rev, tag);
+          if (content) {
+            if (await adoptContent(cur.id, subject.id, content, rev, tag, r.updated_at)) res.updated++;
+          } else res.missing.push(r.uid);
+        }
         if (newer(cur, r)) (await db.sources.update(cur.id, meta), res.updated++);
         continue;
       }
-      const content = await fetchContent(r.uid);
+      const content = await fetchContent(r.uid, rev, tag);
       if (!content) {
         res.missing.push(r.uid);
         continue;
       }
       // Vectors from an older engine (e.g. 768-d Gemini) are kept for keyword fallback and re-embedded on the device.
-      const usable = content.chunks.length > 0 && unb64(content.chunks[0].e).length > 0;
-      const id = await db.sources.add({ ...meta, text: content.text, pages: content.pages, status: usable ? "ready" : "processing", error: null });
+      // A scanned PDF nobody has read yet has no chunks at all: that is a finished source, not an unindexed one.
+      const usable = (content.chunks.length > 0 && unb64(content.chunks[0].e).length > 0) || (!content.chunks.length && !content.text.trim());
+      const id = await db.sources.add({
+        ...meta, text: content.text, pages: content.pages, status: usable ? "ready" : "processing", error: null,
+        ...(content.ai_pages?.length ? { ai_pages: content.ai_pages } : {}), content_rev: rev, ...(tag ? { content_tag: tag } : {}), ...(content.no_text_layer ? { no_text_layer: true } : {}),
+      });
       if (usable)
         await db.chunks.bulkAdd(
           content.chunks.map((c) => ({
@@ -290,6 +391,7 @@ export async function applyLibrary(lib: Library, local: Library, fetchContent: (
     const keep = (t: SyncedTable) => new Set(lib[t].map((r) => r.uid));
     for (const [table, del] of [
       ["threads", (id: number) => db.threads.delete(id)],
+      ["cards", (id: number) => db.cards.delete(id)],
       ["artifacts", localApi.deleteArtifact],
       ["sources", localApi.deleteSource],
       ["subjects", localApi.deleteSubject],
@@ -335,25 +437,55 @@ export async function syncWith(drive: Drive, onStage: (s: string) => void = () =
   const local = await snapshotLocal();
   const merged = merge(local, remote);
   onStage("Bringing in changes");
-  const result = await applyLibrary(merged, local, async (uid) => {
-    const f = files.get(contentName(uid));
+  const result = await applyLibrary(merged, local, async (uid, rev, tag) => {
+    const f = files.get(contentName(uid, rev, tag));
     return f ? ((await drive.read(f.id)) as Content) : null;
   });
 
-  // Upload content for sources Drive doesn't have yet; remove content of deleted sources.
+  // Upload content Drive doesn't have yet (a new source, or a new revision after AI page readings).
+  // The revision uploaded is this device's own: a device that couldn't fetch a newer one must not file old content under it.
   const mine = await uidMap("sources");
-  const toUpload = merged.sources.filter((r) => !files.has(contentName(r.uid)) && mine.get(r.uid)?.status === "ready");
+  const toUpload = merged.sources.filter((r) => {
+    const row = mine.get(r.uid);
+    return row?.status === "ready" && cmpContent(contentOf(row), contentOf(r)) >= 0 && !files.has(contentName(r.uid, row.content_rev ?? 0, row.content_tag ?? ""));
+  });
+  const have = new Map<string, number>(); // uid -> newest revision on Drive after this sync
+  for (const f of files.values()) {
+    const c = parseContentName(f.name);
+    if (c) have.set(c.uid, Math.max(have.get(c.uid) ?? -1, c.rev));
+  }
+  const uploaded = new Set<string>();
   for (let i = 0; i < toUpload.length; i++) {
     onStage(`Uploading sources (${i + 1}/${toUpload.length})`);
-    await drive.write(contentName(toUpload[i].uid), await sourceContent(mine.get(toUpload[i].uid).id));
-  }
-  for (const t of merged.tombstones) {
-    const f = t.table === "sources" ? files.get(contentName(t.uid)) : undefined;
-    if (f) await drive.remove(f.id);
+    const row = mine.get(toUpload[i].uid);
+    // A page-reading run is appending to this source: upload it on the next sync.
+    if ((await localApi.pageReadStatus(row.id))?.state === "running") continue;
+    const snap = await sourceContent(row.id);
+    const name = contentName(toUpload[i].uid, snap.rev, snap.tag);
+    await drive.write(name, snap.content);
+    uploaded.add(name);
+    have.set(toUpload[i].uid, Math.max(have.get(toUpload[i].uid) ?? -1, snap.rev));
+    // The library must point at the content just uploaded (this device may be ahead of the merged row).
+    toUpload[i].content_rev = snap.rev;
+    if (snap.tag) toUpload[i].content_tag = snap.tag;
+    else delete toUpload[i].content_tag;
   }
   // Sources whose content was missing stay out of the library until a device that has them uploads it.
   onStage("Saving to Google Drive");
   await drive.write(LIBRARY, merged, libFile?.id);
+  // Housekeeping once the library points at the new files: content of deleted sources, and superseded revisions.
+  const gone = new Set(merged.tombstones.filter((t) => t.table === "sources").map((t) => t.uid));
+  const current = new Map(merged.sources.map((r) => [r.uid, contentOf(r)]));
+  const exists = (name: string) => files.has(name) || uploaded.has(name);
+  for (const f of files.values()) {
+    const c = parseContentName(f.name);
+    if (!c) continue;
+    const cur = current.get(c.uid);
+    const older = !!cur && c.rev < Math.min(cur.rev, have.get(c.uid) ?? 0);
+    // Same revision, other tag: the loser of a concurrent edit, once the winner's file is on Drive.
+    const loser = !!cur && c.rev === cur.rev && c.tag !== cur.tag && exists(contentName(c.uid, cur.rev, cur.tag));
+    if (gone.has(c.uid) || older || loser) await drive.remove(f.id);
+  }
   return result;
 }
 

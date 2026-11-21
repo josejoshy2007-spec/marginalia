@@ -5,13 +5,17 @@
 import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 import { getSettings, saveSettings } from "../lib/local/settings";
-import { clearExhausted, getUsage, resetUsage } from "../lib/local/usage";
+import { clearExhausted, getUsage, getUsageHistory, resetUsage } from "../lib/local/usage";
+import { db } from "../lib/local/db";
+import { averagesPerCall, formatReport, haikuCost, mixedCost, perMonth, summarize, usd, PRICES, type UsageDay } from "../lib/local/cost";
 import { generateJson, streamGenerate, uploadFile, GeminiError } from "../lib/local/gemini";
 import { fitSchema, parseJsonReply, toMessages } from "../lib/local/cerebras";
+import { claudeTuning, checkAnthropicKey } from "../lib/local/anthropic";
 
-type Reply = { status: number; body?: unknown; sse?: string[] };
+type Reply = { status: number; body?: unknown; sse?: string[]; headers?: Record<string, string> };
 let calls: string[] = [];
 let bodies: any[] = [];
+let heads: Record<string, string>[] = [];
 let script: (who: string) => Reply;
 
 const DAILY = {
@@ -24,11 +28,14 @@ const gem = (obj: unknown) => ({ candidates: [{ content: { parts: [{ text: JSON.
 
 globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
   const url = String(input);
-  const who = url.includes("cerebras")
+  const who = url.includes("anthropic")
+    ? `claude:${init?.body ? JSON.parse(String(init.body)).model : "models"}`
+    : url.includes("cerebras")
     ? `cerebras:${JSON.parse(String(init?.body)).model}`
     : `gemini:${/models\/([^:]+):/.exec(url)?.[1]}`;
   calls.push(who);
   try { bodies.push(JSON.parse(String(init?.body))); } catch { bodies.push(null); }
+  heads.push(init?.headers as Record<string, string>);
   const r = script(who);
   if (r.sse) {
     const enc = new TextEncoder();
@@ -38,9 +45,9 @@ globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
         c.close();
       },
     });
-    return new Response(stream, { status: r.status });
+    return new Response(stream, { status: r.status, headers: r.headers });
   }
-  return new Response(JSON.stringify(r.body ?? {}), { status: r.status, headers: { "Content-Type": "application/json" } });
+  return new Response(JSON.stringify(r.body ?? {}), { status: r.status, headers: { "Content-Type": "application/json", ...r.headers } });
 }) as typeof fetch;
 
 const SCHEMA = {
@@ -51,6 +58,7 @@ let passed = 0;
 const check = async (label: string, fn: () => Promise<void> | void) => {
   calls = [];
   bodies = [];
+  heads = [];
   await clearExhausted();
   await resetUsage();
   await saveSettings({ dailyBudget: 750 });
@@ -279,6 +287,316 @@ await check("uploading a 17 MB file counts one Gemini call (the start), not one 
   const u = await getUsage();
   assert.deepEqual(u.gemini, { recording: 1 });
   assert.equal(u.geminiTotal, 1);
+});
+
+// ---- Claude (Anthropic) first, Gemini as the fallback ----
+
+claudeTuning.scale = 0; // no real waiting between retries
+const claudeMsg = (obj: unknown, stop = "end_turn") => ({ status: 200, body: { content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj) }], stop_reason: stop } });
+const GEM_OK = { status: 200, body: gem({ title: "G", cards: [] }) };
+
+await check("no Anthropic key: Claude is never called", async () => {
+  await saveSettings({ anthropicKey: "", cerebrasKey: "", cerebrasModel: "" });
+  script = () => GEM_OK;
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA)).title, "G");
+  assert.deepEqual(calls, ["gemini:main"]);
+  assert.equal((await getUsage()).claudeTotal, 0);
+});
+
+await saveSettings({ anthropicKey: "sk-ant-test", claudeFastModel: "fast-x", claudeStrongModel: "strong-x" });
+
+await check("with a key, Claude answers first (fast model), schema is sent as structured output, missing fields are filled", async () => {
+  script = (w) => (w.startsWith("claude") ? claudeMsg({ cards: [{ front: "Q", cite: ["2"] }] }) : GEM_OK);
+  const out = await generateJson<any>("sys", "p", SCHEMA, { tag: "deck", thinking: "low" });
+  assert.deepEqual(out, { title: "", cards: [{ front: "Q", cite: [2] }] });
+  assert.deepEqual(calls, ["claude:fast-x"]);
+  const b = bodies[0];
+  assert.equal(b.system, "sys");
+  assert.deepEqual(b.messages, [{ role: "user", content: [{ type: "text", text: "p" }] }]);
+  assert.equal(b.output_config.effort, "low");
+  assert.equal(b.output_config.format.type, "json_schema");
+  const sch = b.output_config.format.schema;
+  assert.equal(sch.type, "object");
+  assert.deepEqual(sch.required, ["title", "cards"]);
+  assert.equal(sch.additionalProperties, false);
+  assert.equal(sch.properties.cards.items.properties.cite.items.type, "integer");
+  assert.equal(heads[0]["x-api-key"], "sk-ant-test");
+  assert.equal(heads[0]["anthropic-dangerous-direct-browser-access"], "true");
+  assert.deepEqual((await getUsage()).claude, { deck: 1 });
+});
+
+await check("marking (geminiOnly) and medium thinking use the strong Claude model", async () => {
+  script = (w) => (w.startsWith("claude") ? claudeMsg({ title: "S", cards: [] }) : GEM_OK);
+  await generateJson("sys", "p", SCHEMA, { geminiOnly: true });
+  await generateJson("sys", "p", SCHEMA, { thinking: "medium" });
+  assert.deepEqual(calls, ["claude:strong-x", "claude:strong-x"]);
+  assert.equal(bodies[1].output_config.effort, "medium");
+});
+
+await check("Claude 429 and 529 fall back to Gemini (overload is retried once first)", async () => {
+  script = (w) => (w.startsWith("claude") ? { status: 429, body: { error: { type: "rate_limit_error", message: "slow down" } } } : GEM_OK);
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA)).title, "G");
+  assert.deepEqual(calls, ["claude:fast-x", "gemini:main"]);
+  calls = [];
+  script = (w) => (w.startsWith("claude") ? { status: 529, body: { error: { type: "overloaded_error", message: "Overloaded" } } } : GEM_OK);
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA)).title, "G");
+  assert.deepEqual(calls, ["claude:fast-x", "claude:fast-x", "gemini:main"]);
+  calls = [];
+  let n = 0;
+  script = (w) => (w.startsWith("claude") ? (n++ === 0 ? { status: 429, body: { error: { type: "rate_limit_error", message: "x" } }, headers: { "retry-after": "1" } } : claudeMsg({ title: "R", cards: [] })) : GEM_OK);
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA)).title, "R"); // short retry-after: waited, then Claude answered
+  assert.deepEqual(calls, ["claude:fast-x", "claude:fast-x"]);
+});
+
+await check("a bad Claude key (401) and a refusal fall back to Gemini", async () => {
+  script = (w) => (w.startsWith("claude") ? { status: 401, body: { error: { type: "authentication_error", message: "invalid x-api-key" } } } : GEM_OK);
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA)).title, "G");
+  assert.deepEqual(calls, ["claude:fast-x", "gemini:main"]);
+  calls = [];
+  script = (w) => (w.startsWith("claude") ? claudeMsg("", "refusal") : GEM_OK);
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA)).title, "G");
+  assert.deepEqual(calls, ["claude:fast-x", "gemini:main"]);
+});
+
+await check("an image part becomes a base64 image block before the text; audio stays on Gemini", async () => {
+  script = (w) => (w.startsWith("claude") ? claudeMsg({ title: "P", cards: [] }) : GEM_OK);
+  await generateJson("sys", "read this", SCHEMA, { parts: [{ inlineData: { mimeType: "image/jpeg", data: "QUJD" } }] });
+  assert.deepEqual(bodies[0].messages[0].content, [
+    { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "QUJD" } },
+    { type: "text", text: "read this" },
+  ]);
+  calls = [];
+  await generateJson("sys", "p", SCHEMA, { parts: [{ inlineData: { mimeType: "audio/mpeg", data: "x" } }] });
+  assert.deepEqual(calls, ["gemini:main"]);
+});
+
+await check("Claude 400 about the schema retries once with the schema in the prompt", async () => {
+  let n = 0;
+  script = (w) =>
+    w.startsWith("claude")
+      ? n++ === 0
+        ? { status: 400, body: { error: { type: "invalid_request_error", message: "output_config.format: schema not supported" } } }
+        : claudeMsg('```json\n{"title":"F","cards":[]}\n```')
+      : GEM_OK;
+  assert.equal((await generateJson<any>("sys", "p", SCHEMA)).title, "F");
+  assert.deepEqual(calls, ["claude:fast-x", "claude:fast-x"]);
+  assert.equal(bodies[1].output_config?.format, undefined);
+  assert.match(bodies[1].system, /JSON Schema/);
+});
+
+const sseEv = (o: unknown) => `data: ${JSON.stringify(o)}`;
+const chatBody = { systemInstruction: { parts: [{ text: "S" }] }, contents: [{ role: "user", parts: [{ text: "q" }] }, { role: "model", parts: [{ text: "a" }] }, { role: "user", parts: [{ text: "q2" }] }] };
+
+await check("chat streams from Claude: text deltas and finish reasons mapped (end_turn, max_tokens, refusal)", async () => {
+  for (const [stop, want] of [["end_turn", "STOP"], ["max_tokens", "MAX_TOKENS"], ["refusal", "SAFETY"]] as const) {
+    calls = [];
+    bodies = [];
+    script = (w) =>
+      w.startsWith("claude")
+        ? { status: 200, sse: [sseEv({ type: "message_start" }), sseEv({ type: "content_block_delta", delta: { type: "text_delta", text: "Hello [1]" } }), sseEv({ type: "content_block_delta", delta: { type: "text_delta", text: " there" } }), sseEv({ type: "message_delta", delta: { stop_reason: stop } }), sseEv({ type: "message_stop" })] }
+        : { status: 429, body: DAILY };
+    let text = "";
+    let finish: string | null | undefined;
+    for await (const p of streamGenerate(chatBody, undefined, { tag: "chat" })) {
+      if (p.text) text += p.text;
+      if ("finish" in p) finish = p.finish;
+    }
+    assert.equal(text, "Hello [1] there");
+    assert.equal(finish, want);
+    assert.deepEqual(calls, ["claude:fast-x"]);
+    assert.equal(bodies[0].stream, true);
+    assert.deepEqual(bodies[0].messages.map((m: any) => m.role), ["user", "assistant", "user"]);
+  }
+});
+
+await check("a failing Claude stream request falls back to Gemini's stream", async () => {
+  script = (w) =>
+    w.startsWith("claude")
+      ? { status: 529, body: { error: { type: "overloaded_error", message: "o" } } }
+      : { status: 200, sse: [sseEv({ candidates: [{ content: { parts: [{ text: "From Gemini" }] }, finishReason: "STOP" }] })] };
+  let text = "";
+  for await (const p of streamGenerate(chatBody)) if (p.text) text += p.text;
+  assert.equal(text, "From Gemini");
+  assert.deepEqual(calls, ["claude:fast-x", "claude:fast-x", "gemini:main"]);
+});
+
+const photoBody = { systemInstruction: { parts: [{ text: "S" }] }, contents: [{ role: "user", parts: [{ inlineData: { mimeType: "image/jpeg", data: "AAAA" } }, { text: "what is this?" }] }] };
+
+await check("a chat question with a photo goes to Claude (image block sent) when a key is set", async () => {
+  script = (w) =>
+    w.startsWith("claude")
+      ? { status: 200, sse: [sseEv({ type: "message_start" }), sseEv({ type: "content_block_delta", delta: { type: "text_delta", text: "A graph" } }), sseEv({ type: "message_delta", delta: { stop_reason: "end_turn" } }), sseEv({ type: "message_stop" })] }
+      : { status: 429, body: DAILY };
+  let text = "";
+  for await (const p of streamGenerate(photoBody, undefined, { tag: "chat" })) if (p.text) text += p.text;
+  assert.equal(text, "A graph");
+  assert.deepEqual(calls, ["claude:fast-x"]);
+  assert.ok(JSON.stringify(bodies[0].messages).includes('"type":"image"'));
+});
+
+await check("a chat question with a photo never goes to Cerebras, even when Gemini and Claude are out", async () => {
+  await saveSettings({ anthropicKey: "", cerebrasKey: "csk-test", cerebrasModel: "gpt-oss-120b" });
+  script = (w) => (w.startsWith("cerebras") ? { status: 200, sse: ['data: {"choices":[{"delta":{"content":"no"},"finish_reason":"stop"}]}', "data: [DONE]"] } : { status: 429, body: DAILY });
+  await assert.rejects(async () => {
+    for await (const _ of streamGenerate(photoBody, undefined, { tag: "chat" }));
+  }, GeminiError);
+  assert.ok(!calls.some((c) => c.startsWith("cerebras")), calls.join(","));
+  // The same stream without a photo does use Cerebras (control).
+  calls = [];
+  let text = "";
+  for await (const p of streamGenerate(chatBody)) if (p.text) text += p.text;
+  assert.equal(text, "no");
+  assert.ok(calls.some((c) => c.startsWith("cerebras")));
+  await saveSettings({ anthropicKey: "sk-ant-test", cerebrasKey: "", cerebrasModel: "" });
+});
+
+await check("with no Gemini key, a Claude failure is reported as such", async () => {
+  await saveSettings({ geminiKey: "" });
+  script = () => ({ status: 401, body: { error: { type: "authentication_error", message: "bad" } } });
+  await assert.rejects(generateJson("sys", "p", SCHEMA), (e: unknown) => e instanceof GeminiError && /Anthropic/.test(e.message));
+  await saveSettings({ geminiKey: "test" });
+});
+
+await check("checkAnthropicKey: ok, rejected key, unknown model", async () => {
+  script = () => ({ status: 200, body: {} });
+  assert.equal(await checkAnthropicKey("k", "fast-x"), null);
+  script = () => ({ status: 401, body: {} });
+  assert.match((await checkAnthropicKey("k"))!, /rejected/);
+  script = () => ({ status: 404, body: {} });
+  assert.match((await checkAnthropicKey("k", "nope"))!, /nope/);
+});
+
+await check("a webm voice recording is sent to Gemini as video/webm (codec suffix stripped)", async () => {
+  const { transcribeVoice } = await import("../lib/local/vision");
+  for (const type of ["audio/webm", "audio/webm;codecs=opus", ""]) {
+    calls = [];
+    bodies = [];
+    script = () => ({ status: 200, body: { candidates: [{ content: { parts: [{ text: "what is entropy" }] }, finishReason: "STOP" }] } });
+    assert.equal(await transcribeVoice(new Blob(["abc"], { type })), "what is entropy");
+    const part = bodies[0].contents[0].parts.find((p: any) => p.inlineData);
+    assert.equal(part.inlineData.mimeType, "video/webm", `type "${type}"`);
+  }
+});
+
+// ---- token usage and the Claude cost estimate ----
+
+const todayTokens = async () => (await getUsageHistory(1)).at(-1)?.data.tokens ?? {};
+const gemTok = (obj: unknown, usageMetadata: unknown) => ({ status: 200, body: { ...gem(obj), usageMetadata } });
+const CER_OK = (usage?: unknown) => ({ status: 200, body: { choices: [{ message: { content: '{"title":"C","cards":[]}' }, finish_reason: "stop" }], ...(usage ? { usage } : {}) } });
+
+await check("Gemini tokens are recorded per tag (thinking counts as output); marking is flagged strong; failures record nothing", async () => {
+  await saveSettings({ anthropicKey: "", cerebrasKey: "", cerebrasModel: "" });
+  script = () => gemTok({ title: "A", cards: [] }, { promptTokenCount: 100, candidatesTokenCount: 40, thoughtsTokenCount: 10, totalTokenCount: 150 });
+  await generateJson("sys", "p", SCHEMA, { tag: "deck" });
+  await generateJson("sys", "p", SCHEMA, { tag: "deck" });
+  await generateJson("sys", "p", SCHEMA, { tag: "mark", geminiOnly: true });
+  let t = await todayTokens();
+  assert.deepEqual(t.gemini?.deck, { n: 2, input: 200, output: 100 });
+  assert.deepEqual(t.gemini?.mark, { n: 1, input: 100, output: 50, sIn: 100, sOut: 50 });
+  assert.equal((await getUsage()).gemini.deck, 2); // call counts unchanged
+  // an error response carries no usage: nothing recorded
+  script = () => ({ status: 429, body: DAILY });
+  await assert.rejects(generateJson("sys", "p", SCHEMA, { tag: "quiz" }));
+  t = await todayTokens();
+  assert.equal(t.gemini?.quiz, undefined);
+  assert.ok((await getUsage()).gemini.quiz > 0);
+});
+
+await check("a streamed Gemini answer records the totals from the last chunk, not each chunk", async () => {
+  await saveSettings({ anthropicKey: "", cerebrasKey: "", cerebrasModel: "" });
+  const chunk = (text: string, u: unknown) => sseEv({ candidates: [{ content: { parts: [{ text }] }, finishReason: "STOP" }], usageMetadata: u });
+  script = () => ({ status: 200, sse: [chunk("Hi", { promptTokenCount: 500, candidatesTokenCount: 2 }), chunk(" there", { promptTokenCount: 500, candidatesTokenCount: 30, thoughtsTokenCount: 70 })] });
+  let text = "";
+  for await (const p of streamGenerate(chatBody, undefined, { tag: "chat" })) if (p.text) text += p.text;
+  assert.equal(text, "Hi there");
+  assert.deepEqual((await todayTokens()).gemini?.chat, { n: 1, input: 500, output: 100 });
+});
+
+await check("Cerebras tokens come from usage (normal and streamed), under cerebras", async () => {
+  await saveSettings({ anthropicKey: "", cerebrasKey: "csk-test", cerebrasModel: "gpt-oss-120b" });
+  script = (w) => (w.startsWith("cerebras") ? CER_OK({ prompt_tokens: 300, completion_tokens: 80, total_tokens: 380 }) : { status: 429, body: DAILY });
+  await generateJson("sys", "p", SCHEMA, { tag: "sheet" });
+  script = (w) =>
+    w.startsWith("cerebras")
+      ? { status: 200, sse: ['data: {"choices":[{"delta":{"content":"ok"}}]}', 'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":40,"completion_tokens":6}}', "data: [DONE]"] }
+      : { status: 429, body: DAILY };
+  for await (const _ of streamGenerate(chatBody, undefined, { tag: "chat" }));
+  const t = await todayTokens();
+  assert.deepEqual(t.cerebras?.sheet, { n: 1, input: 300, output: 80 });
+  assert.deepEqual(t.cerebras?.chat, { n: 1, input: 40, output: 6 });
+  assert.equal(t.gemini, undefined); // Gemini only failed
+  await saveSettings({ cerebrasKey: "", cerebrasModel: "" });
+});
+
+await check("Claude tokens (normal and streamed) include cache fields; the strong model is flagged", async () => {
+  await saveSettings({ anthropicKey: "sk-ant-test", cerebrasKey: "", cerebrasModel: "" });
+  const withUsage = (usage: unknown) => ({ status: 200, body: { content: [{ type: "text", text: '{"title":"S","cards":[]}' }], stop_reason: "end_turn", usage } });
+  script = (w) => (w.startsWith("claude") ? withUsage({ input_tokens: 50, cache_creation_input_tokens: 10, cache_read_input_tokens: 40, output_tokens: 25 }) : GEM_OK);
+  await generateJson("sys", "p", SCHEMA, { tag: "deck" });
+  await generateJson("sys", "p", SCHEMA, { tag: "mark", geminiOnly: true });
+  script = (w) =>
+    w.startsWith("claude")
+      ? { status: 200, sse: [sseEv({ type: "message_start", message: { usage: { input_tokens: 700, output_tokens: 1 } } }), sseEv({ type: "content_block_delta", delta: { type: "text_delta", text: "Hi" } }), sseEv({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 90 } })] }
+      : { status: 429, body: DAILY };
+  for await (const _ of streamGenerate(chatBody, undefined, { tag: "chat" }));
+  const t = await todayTokens();
+  assert.deepEqual(t.claude?.deck, { n: 1, input: 100, output: 25, cached: 40 });
+  assert.deepEqual(t.claude?.mark, { n: 1, input: 100, output: 25, cached: 40, sIn: 100, sOut: 25 });
+  assert.deepEqual(t.claude?.chat, { n: 1, input: 700, output: 90 });
+  assert.equal(t.gemini, undefined);
+});
+
+await check("cost maths with the Haiku 5.5 and Sonnet 5.5 prices (exact numbers)", () => {
+  assert.equal(PRICES.haiku.input, 0.1);
+  assert.equal(PRICES.haiku.output, 0.5);
+  assert.equal(PRICES.sonnet.input, 2);
+  assert.equal(PRICES.sonnet.output, 10);
+  assert.equal(usd(1_000_000, 200_000, PRICES.haiku).toFixed(6), "0.200000");
+  const row = { calls: 10, input: 1_000_000, output: 200_000, sIn: 100_000, sOut: 20_000, estCalls: 0 };
+  assert.equal(haikuCost(row).toFixed(6), "0.200000");
+  assert.equal(mixedCost(row).toFixed(6), "0.580000"); // 900k/180k on Haiku = 0.18, 100k/20k on Sonnet = 0.40
+  assert.equal(perMonth(0.7).toFixed(6), ((0.7 * 30) / 7).toFixed(6));
+});
+
+await check("days with calls but no tokens are estimated from the feature's average tokens per call", () => {
+  const day = (calls: Record<string, number>, tokens?: UsageDay["tokens"]): UsageDay => ({ gemini: calls, cerebras: {}, claude: {}, ...(tokens ? { tokens } : {}) });
+  const days = [
+    { day: "2026-11-19", data: day({ quiz: 2 }, { gemini: { quiz: { n: 2, input: 2000, output: 600 } } }) },
+    { day: "2026-11-20", data: day({ quiz: 5, audio: 3 }) }, // old row: calls only
+    { day: "2026-11-21", data: day({ quiz: 1 }, { gemini: { quiz: { n: 1, input: 900, output: 300 } } }) },
+  ];
+  assert.deepEqual(averagesPerCall(days).quiz, { input: 2900 / 3, output: 900 / 3, sIn: 0, sOut: 0 });
+  const sum = summarize(days);
+  const d20 = sum.days.find((d) => d.day === "2026-11-20")!;
+  assert.equal(d20.estimated, true);
+  assert.equal(d20.features.quiz.estimated, true);
+  assert.equal(d20.row.input, Math.round((2900 / 3) * 5));
+  assert.equal(d20.row.output, 1500);
+  assert.equal(d20.row.estCalls, 5);
+  assert.equal(sum.days.find((d) => d.day === "2026-11-21")!.estimated, false); // measured stays measured
+  assert.deepEqual(sum.noBasis, [{ tag: "audio", calls: 3 }]); // no token data for audio anywhere: not priced
+  assert.equal(sum.total.input, 2000 + 900 + Math.round((2900 / 3) * 5));
+  const text = formatReport(sum, "2026-11-21");
+  assert.match(text, /estimated from call counts/);
+  assert.match(text, /Haiku 5\.5 \$0\.10 in \/ \$0\.50 out/);
+  assert.match(text, /No token basis \(calls not priced\): audio 3/);
+});
+
+await check("old usage rows (calls only, no tokens field) still load, alone and in the history", async () => {
+  const y = new Date(Date.now() - 86_400_000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  const label = `${y.getFullYear()}-${p(y.getMonth() + 1)}-${p(y.getDate())}`;
+  const key = `usage-${label}`;
+  await db.settings.put({ key, value: { gemini: { deck: 4 }, cerebras: {}, claude: {} } });
+  const h = await getUsageHistory(7);
+  const old = h.find((d) => d.day === label)!;
+  assert.deepEqual(old.data.gemini, { deck: 4 });
+  assert.equal(old.data.tokens, undefined);
+  assert.equal(summarize(h).total.calls, 4);
+  // a row that is missing even the per-provider maps also loads
+  await db.settings.put({ key, value: { gemini: { deck: 1 } } });
+  assert.deepEqual((await getUsageHistory(7)).find((d) => d.day === label)!.data.claude, {});
+  await db.settings.delete(key);
 });
 
 console.log(`\nALL ${passed} PROVIDER CHECKS PASSED`);

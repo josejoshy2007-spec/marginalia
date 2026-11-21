@@ -3,8 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import { checkKey } from "@/lib/local/gemini";
 import { checkCerebrasKey } from "@/lib/local/cerebras";
+import { checkAnthropicKey } from "@/lib/local/anthropic";
 import { DEFAULTS, getSettings, saveSettings, type Settings } from "@/lib/local/settings";
-import { clearExhausted, exhaustedModels, getUsage, resetUsage, type UsageDay } from "@/lib/local/usage";
+import { clearExhausted, exhaustedModels, getUsage, getUsageHistory, resetUsage, type UsageDay } from "@/lib/local/usage";
+import { PRICES, formatReport, haikuCost, localDayLabel, mixedCost, money, num, perMonth, summarize, type Summary } from "@/lib/local/cost";
 import { localApi } from "@/lib/local/store";
 import { saveFile, scheduleReminder, isNative } from "@/lib/native";
 import { CloseIcon } from "./icons";
@@ -12,7 +14,7 @@ import DriveSync from "./DriveSync";
 import { Segmented } from "./study/shared";
 import { applyTheme } from "@/lib/theme";
 
-type UsageView = UsageDay & { geminiTotal: number; cerebrasTotal: number; exhausted: Record<string, string> };
+type UsageView = UsageDay & { geminiTotal: number; cerebrasTotal: number; claudeTotal: number; exhausted: Record<string, string> };
 
 const top = (r: Record<string, number>) => Object.entries(r).sort((a, b) => b[1] - a[1]);
 
@@ -20,7 +22,12 @@ const top = (r: Record<string, number>) => Object.entries(r).sort((a, b) => b[1]
 function UsageSection({ s, update }: { s: Settings; update: (patch: Partial<Settings>) => Promise<void> }) {
   const [u, setU] = useState<UsageView | null>(null);
   const [budget, setBudget] = useState(String(s.dailyBudget));
-  const load = async () => setU({ ...(await getUsage()), exhausted: await exhaustedModels() });
+  const [week, setWeek] = useState<Summary | null>(null);
+  const [copied, setCopied] = useState<"ok" | "fail" | null>(null);
+  const load = async () => {
+    setU({ ...(await getUsage()), exhausted: await exhaustedModels() });
+    setWeek(summarize(await getUsageHistory(7)));
+  };
   useEffect(() => {
     load().catch(() => {});
   }, []);
@@ -56,7 +63,8 @@ function UsageSection({ s, update }: { s: Settings; update: (patch: Partial<Sett
           ))}
         </ul>
       )}
-      {u && u.cerebrasTotal > 0 && <p className="mt-2 text-xs text-muted">Cerebras: {u.cerebrasTotal} calls today (not limited by the budget).</p>}
+      {u && u.claudeTotal > 0 && <p className="mt-2 text-xs text-muted">Claude: {u.claudeTotal} calls today (paid by you, not counted in the budget).</p>}
+      {u && u.cerebrasTotal > 0 &&<p className="mt-2 text-xs text-muted">Cerebras: {u.cerebrasTotal} calls today (not limited by the budget).</p>}
       {u && Object.keys(u.exhausted).length > 0 && (
         <div className="mt-2 text-xs text-muted">
           <p>Out of free quota for today (skipped until reset):</p>
@@ -72,6 +80,14 @@ function UsageSection({ s, update }: { s: Settings; update: (patch: Partial<Sett
           </button>
         </div>
       )}
+      {week && week.total.calls > 0 && <CostSection week={week} copied={copied} onCopy={async () => {
+        try {
+          await navigator.clipboard.writeText(formatReport(week, localDayLabel()));
+          setCopied("ok");
+        } catch {
+          setCopied("fail");
+        }
+      }} />}
       <label className="mt-3 flex items-center gap-2 text-sm">
         Daily budget
         <input
@@ -92,6 +108,53 @@ function UsageSection({ s, update }: { s: Settings; update: (patch: Partial<Sett
         Reset counter
       </button>
     </section>
+  );
+}
+
+/** Tokens and the rough cost of the same usage on Claude Haiku 5.5: today, the last 7 days, a month projection, per feature. */
+function CostSection({ week, copied, onCopy }: { week: Summary; copied: "ok" | "fail" | null; onCopy: () => void }) {
+  const todayRow = week.days.at(-1)?.day === localDayLabel() ? week.days.at(-1)! : null;
+  const t = week.total;
+  const tokens = (r: { input: number; output: number }) => `${num(r.input)} in / ${num(r.output)} out`;
+  return (
+    <div className="mt-4 border-t border-line pt-3">
+      <h4 className="text-sm font-semibold">Cost on Claude (rough estimate)</h4>
+      <p className="mt-0.5 text-xs text-muted">
+        Tokens are counted by each AI's own tokenizer, so these are rough. Priced at {PRICES.haiku.name} (${PRICES.haiku.input.toFixed(2)} in / ${PRICES.haiku.output.toFixed(2)} out per million tokens).
+      </p>
+      {todayRow && (
+        <p className="mt-2 text-sm">
+          Today: {todayRow.row.calls} calls, {tokens(todayRow.row)} <span className="text-muted">≈ {money(haikuCost(todayRow.row))}</span>
+          {todayRow.estimated && <span className="text-xs text-muted"> (estimated from call counts)</span>}
+        </p>
+      )}
+      <p className="mt-1 text-sm">
+        Last 7 days: {t.calls} calls, {tokens(t)}
+      </p>
+      <p className="text-sm">
+        <span className="tabular-nums">{money(haikuCost(t))}</span> <span className="text-muted">for 7 days, about</span>{" "}
+        <span className="tabular-nums">{money(perMonth(haikuCost(t)))}</span> <span className="text-muted">a month</span>
+      </p>
+      <p className="text-xs text-muted">
+        With marking on {PRICES.sonnet.name}: {money(mixedCost(t))} for 7 days, about {money(perMonth(mixedCost(t)))} a month.
+      </p>
+      {t.estCalls > 0 && <p className="text-xs text-muted">{t.estCalls} of {t.calls} calls were estimated from call counts (days before tokens were counted).</p>}
+      <ul className="mt-2 text-xs">
+        {week.features.slice(0, 12).map((f) => (
+          <li key={f.tag} className="flex justify-between gap-2 border-b border-line py-0.5 last:border-0">
+            <span className="min-w-0 truncate">{f.tag}{f.row.estCalls > 0 && <span className="text-muted"> (est.)</span>}</span>
+            <span className="shrink-0 tabular-nums text-muted">
+              {f.row.calls} calls · {num((f.row.input + f.row.output) / 1000)}k tokens · <span className="text-ink">{money(haikuCost(f.row))}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      <button type="button" className="mt-2 rounded bg-accent px-3 py-1.5 text-sm font-medium text-on-accent" onClick={onCopy}>
+        Copy usage summary
+      </button>
+      {copied === "ok" && <span className="ml-2 text-xs text-muted">Copied. Paste it to Claude.</span>}
+      {copied === "fail" && <span className="ml-2 text-xs text-danger">Couldn&apos;t copy. Allow clipboard access and try again.</span>}
+    </div>
   );
 }
 
@@ -122,12 +185,16 @@ export default function SettingsSheet({
   const [cKey, setCKey] = useState("");
   const [cMsg, setCMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [cChecking, setCChecking] = useState(false);
+  const [aKey, setAKey] = useState("");
+  const [aMsg, setAMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [aChecking, setAChecking] = useState(false);
 
   useEffect(() => {
     getSettings().then((v) => {
       setS(v);
       setKey(v.geminiKey);
       setCKey(v.cerebrasKey);
+      setAKey(v.anthropicKey);
     });
     navigator.storage
       ?.estimate?.()
@@ -169,6 +236,22 @@ export default function SettingsSheet({
     if ("error" in r) return setCMsg({ ok: false, text: r.error });
     await update({ cerebrasKey: cKey.trim(), cerebrasModel: r.model });
     setCMsg({ ok: true, text: `Key works. Using ${r.model}.` });
+  };
+
+  const saveAnthropic = async () => {
+    setAChecking(true);
+    setAMsg(null);
+    const err = await checkAnthropicKey(aKey, s?.claudeFastModel);
+    setAChecking(false);
+    if (err) return setAMsg({ ok: false, text: err });
+    await update({ anthropicKey: aKey.trim() });
+    setAMsg({ ok: true, text: "Key works and is saved on this device." });
+  };
+
+  const removeAnthropic = async () => {
+    await update({ anthropicKey: "" });
+    setAKey("");
+    setAMsg({ ok: true, text: "Removed." });
   };
 
   const removeCerebras = async () => {
@@ -276,6 +359,63 @@ export default function SettingsSheet({
         {!firstRun && (
           <>
             <UsageSection s={s} update={update} />
+
+            <section className="mt-6 border-t border-line pt-4">
+              <h3 className="text-sm font-semibold">Anthropic (Claude) key (optional)</h3>
+              <p className="mt-1 text-xs text-muted">
+                With a key, Claude answers first. It is paid per use by Anthropic, and Gemini stays as the backup if Claude
+                is busy or fails. The key is stored only on this device. Get one at{" "}
+                <a className="text-accent underline" href="https://console.anthropic.com" target="_blank" rel="noreferrer">
+                  console.anthropic.com
+                </a>
+                .
+              </p>
+              <div className="mt-2 flex gap-2">
+                <input
+                  className="field min-w-0 flex-1 font-mono text-sm"
+                  type={show ? "text" : "password"}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="sk-ant-…"
+                  aria-label="Anthropic API key"
+                  value={aKey}
+                  onChange={(e) => setAKey(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && aKey.trim() && saveAnthropic()}
+                />
+              </div>
+              <div className="mt-2 grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2 text-xs">
+                {(
+                  [
+                    ["claudeFastModel", "Fast model"],
+                    ["claudeStrongModel", "Marking model"],
+                  ] as const
+                ).map(([k, label]) => (
+                  <label key={k} className="contents">
+                    <span className="text-muted">{label}</span>
+                    <input
+                      className="field !py-1 font-mono text-xs"
+                      defaultValue={s[k]}
+                      onBlur={(e) => update({ [k]: e.target.value.trim() || DEFAULTS[k] })}
+                    />
+                  </label>
+                ))}
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <button type="button" className="btn-ghost" disabled={!aKey.trim() || aChecking} onClick={saveAnthropic}>
+                  {aChecking ? "Checking…" : "Check and save"}
+                </button>
+                {s.anthropicKey && (
+                  <button type="button" className="text-xs text-muted underline" onClick={removeAnthropic}>
+                    Remove
+                  </button>
+                )}
+                {aMsg ? (
+                  <span className={`text-xs ${aMsg.ok ? "text-moss" : "text-danger"}`}>{aMsg.text}</span>
+                ) : (
+                  s.anthropicKey && <span className="text-xs text-muted">On, using {s.claudeFastModel}.</span>
+                )}
+              </div>
+            </section>
 
             <section className="mt-6 border-t border-line pt-4">
               <h3 className="text-sm font-semibold">Extra free AI (optional)</h3>

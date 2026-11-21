@@ -4,13 +4,33 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { GeminiError, generateJson } from "./gemini";
 import { CITE, SELF_CONTAINED, STYLE, cleanCites, focusLine, questionMarks, type Rec } from "./gen";
-import { COMMAND_TERMS, MARKING_RULES, commandTermsBlock } from "./ib";
+import {
+  COMMAND_TERMS,
+  EXAM_MARKS,
+  GENERIC_EXAM_PROFILE,
+  MARKING_RULES,
+  MATHS_TERMS,
+  commandTermsBlock,
+  examPaper,
+  examProfile,
+  examProfileRules,
+  markingStyleRules,
+  normaliseTerm,
+  paperMarkingRules,
+  paperStyleSection,
+  paperTotal,
+  UNIT_COUNT,
+  type Calculator,
+  type CodeLanguage,
+  type ExamPaper,
+  type ExamProfile,
+} from "./ib";
 import { passagesPrompt, type Retrieved } from "./search";
 
 const MARKSCHEME = {
   type: "OBJECT",
   properties: {
-    type: { type: "STRING", enum: ["points", "markbands"] },
+    type: { type: "STRING", enum: ["points", "markbands", "criteria"] },
     points: {
       type: "ARRAY",
       items: {
@@ -27,33 +47,59 @@ const MARKSCHEME = {
         required: ["marks", "descriptor"],
       },
     },
+    // Criterion-marked tasks (English, Spanish writing): the band descriptors of each criterion.
+    criteria: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          code: { type: "STRING" },
+          descriptors: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: { marks: { type: "STRING" }, descriptor: { type: "STRING" } },
+              required: ["marks", "descriptor"],
+            },
+          },
+        },
+        required: ["code", "descriptors"],
+      },
+    },
     indicative: { type: "ARRAY", items: { type: "STRING" } },
     notes: { type: "STRING" },
   },
   required: ["type"],
 };
 
-const EXAM_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    title: { type: "STRING" },
-    questions: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          command_term: { type: "STRING" },
-          question: { type: "STRING" },
-          marks: { type: "INTEGER" },
-          markscheme: MARKSCHEME,
-          cite: CITE,
-        },
-        required: ["command_term", "question", "marks", "markscheme", "cite"],
-      },
+/** The question-set schema; papers with a shared text or English glosses require those fields (Gemini drops optional ones). */
+function examSchema(paper?: ExamPaper) {
+  const required = ["command_term", "question", "marks", "markscheme", "cite"];
+  const properties: Record<string, unknown> = {
+    command_term: { type: "STRING" },
+    question: { type: "STRING" },
+    marks: { type: "INTEGER" },
+    markscheme: MARKSCHEME,
+    cite: CITE,
+  };
+  if (paper?.stem) {
+    properties.stem = { type: "STRING" };
+    required.push("stem");
+  }
+  if (paper?.glossed) {
+    properties.gloss = { type: "STRING" };
+    required.push("gloss");
+  }
+  return {
+    type: "OBJECT",
+    properties: {
+      title: { type: "STRING" },
+      questions: { type: "ARRAY", items: { type: "OBJECT", properties, required } },
     },
-  },
-  required: ["title", "questions"],
-};
+    required: ["title", "questions"],
+  };
+}
+const EXAM_SCHEMA = examSchema();
 
 const MARK_SCHEMA = {
   type: "OBJECT",
@@ -67,6 +113,30 @@ const MARK_SCHEMA = {
         required: ["index", "awarded", "comment"],
       },
     },
+    // Criterion-marked tasks: one entry per criterion.
+    criteria: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          code: { type: "STRING" },
+          awarded: { type: "INTEGER" },
+          band: { type: "STRING" },
+          comment: { type: "STRING" },
+          next: { type: "STRING" },
+        },
+        required: ["code", "awarded", "comment"],
+      },
+    },
+    // Spanish writing: the language mistakes with corrections.
+    mistakes: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: { text: { type: "STRING" }, correction: { type: "STRING" }, note: { type: "STRING" } },
+        required: ["text", "correction"],
+      },
+    },
     band: { type: "STRING" },
     strengths: { type: "STRING" },
     improvements: { type: "STRING" },
@@ -75,17 +145,21 @@ const MARK_SCHEMA = {
   required: ["marks_awarded", "points", "strengths", "improvements", "model_answer"],
 };
 
-export const EXAM_SIZES: Record<string, number> = { short: 15, section: 30, paper: 50 };
+export const EXAM_SIZES: Record<string, number> = EXAM_MARKS;
 
-const EXAMINER = () =>
+const termDefs = (profile: ExamProfile) =>
+  profile.commandTerms.map((t) => `- ${t}: ${COMMAND_TERMS[t]?.[1] ?? MATHS_TERMS[t] ?? ""}`).join("\n");
+
+const EXAMINER = (profile: ExamProfile = GENERIC_EXAM_PROFILE) =>
   "You are an experienced IB senior examiner who writes exam questions and markschemes. " +
   STYLE +
   SELF_CONTAINED +
   " Markers cannot see diagrams the student drew: judge only what the answer says in words, numbers and equations, and never expect a sketch you cannot see." +
   "\n\n" +
   MARKING_RULES +
-  "\n\nIB command terms:\n" +
-  commandTermsBlock();
+  (profile.markingStyle === "maths"
+    ? markingStyleRules(profile) + "\n\nInstruction words:\n" + termDefs(profile)
+    : "\n\nIB command terms:\n" + commandTermsBlock());
 
 const str = (x: unknown) => (typeof x === "string" ? x.trim() : "");
 
@@ -95,34 +169,75 @@ function knownTerm(term: string): string {
   return hit ?? (term ? term[0].toUpperCase() + term.slice(1).toLowerCase() : term);
 }
 
-export function cleanQuestion(q: Rec, n: number): Rec | null {
+export function cleanQuestion(
+  q: Rec,
+  n: number,
+  profile: ExamProfile = GENERIC_EXAM_PROFILE,
+  opts: { paper?: ExamPaper } = {},
+): Rec | null {
+  const maths = profile.markingStyle === "maths";
+  const paper = opts.paper;
+  const criteria = paper?.criteria;
   const marks = q.marks;
   const text = str(q.question);
   const ms = q.markscheme ?? {};
   if (!text || !Number.isInteger(marks) || marks < 1) return null;
   const points = (ms.points ?? [])
     .filter((p: Rec) => str(p.text))
-    .map((p: Rec) => ({ text: str(p.text), marks: Math.max(1, Math.trunc(p.marks || 1)) }));
+    // Maths markschemes have AG lines worth 0.
+    .map((p: Rec) => ({ text: str(p.text), marks: Math.max(maths ? 0 : 1, Math.trunc(Number.isFinite(p.marks) ? p.marks : 1)) }));
   const bands = (ms.markbands ?? [])
     .filter((b: Rec) => str(b.descriptor))
     .map((b: Rec) => ({ marks: String(b.marks).trim(), descriptor: str(b.descriptor) }));
-  const kind = ms.type === "markbands" && bands.length ? "markbands" : "points";
+  const allowsExtended = paper ? paper.allowsExtended : profile.allowsExtended;
+  const kind = criteria ? "criteria" : ms.type === "markbands" && bands.length && allowsExtended ? "markbands" : "points";
   if (kind === "points" && !points.length) return null;
-  const term = knownTerm(q.command_term ?? "");
+  // Criterion-marked tasks always carry the course's own criteria and maxima; the model supplies the band descriptors.
+  const criteriaOut = criteria
+    ? criteria.map((c) => {
+        const raw = (ms.criteria ?? []).find((x: Rec) => str(x.code).toUpperCase() === c.code) ?? {};
+        const descriptors = (raw.descriptors ?? [])
+          .filter((d: Rec) => str(d.descriptor))
+          .map((d: Rec) => ({ marks: String(d.marks).trim(), descriptor: str(d.descriptor) }));
+        return { code: c.code, name: c.name, max: c.max, descriptors };
+      })
+    : [];
+  let term: string;
+  if (profile === GENERIC_EXAM_PROFILE) term = knownTerm(q.command_term ?? "");
+  else term = normaliseTerm(q.command_term ?? "", text, profile) || (maths ? "Find" : knownTerm(q.command_term ?? ""));
+  let stem = paper?.stem ? str(q.stem) : "";
+  if (stem && paper?.stem?.fictional && !/fictional|ficticio/i.test(stem))
+    stem = "Fictional extract, written for this practice question.\n\n" + stem;
   return {
     command_term: term,
-    objective: COMMAND_TERMS[term]?.[0] ?? 2,
+    objective: profile.objectiveLabels ? (COMMAND_TERMS[term]?.[0] ?? 2) : 0,
     question: text,
-    marks: Math.min(marks, 20),
+    // A criterion-marked task is always out of the sum of its criteria.
+    marks: criteria ? criteria.reduce((s, c) => s + c.max, 0) : Math.min(marks, 20),
+    ...(paper ? { paper: paper.id } : {}),
+    ...(stem ? { stem } : {}),
+    ...(paper?.glossed && str(q.gloss) ? { gloss: str(q.gloss) } : {}),
     markscheme: {
       type: kind,
       points,
       markbands: bands,
+      criteria: criteriaOut,
       indicative: (ms.indicative ?? []).map((x: unknown) => String(x).trim()).filter(Boolean),
       notes: str(ms.notes),
     },
     cite: cleanCites(q.cite, n),
   };
+}
+
+/** Items of a paper that share a text (`stem`) inherit it from the first item of their unit, so each can be marked on its own. */
+function shareStems(questions: Rec[], paper?: ExamPaper): Rec[] {
+  if (!paper?.stem?.shared) return questions;
+  let cur = "";
+  return questions.map((q) => {
+    if (q.stem) cur = q.stem;
+    else if (cur) return { ...q, stem: cur };
+    return q;
+  });
 }
 
 export async function buildExam(
@@ -132,34 +247,63 @@ export async function buildExam(
   focus: string | null | undefined,
   courseLabel: string,
   ctx: string,
+  opts: {
+    style?: string;
+    course?: string | null;
+    level?: string | null;
+    calculator?: Calculator | null;
+    paper?: string | null;
+    language?: CodeLanguage | null;
+  } = {},
 ) {
-  const total = EXAM_SIZES[size] ?? EXAM_SIZES.short;
+  const profile = examProfile(opts.course);
+  const maths = profile.markingStyle === "maths";
+  const paper = examPaper(profile, opts.paper);
+  extended = extended && (paper ? paper.allowsExtended : profile.allowsExtended);
+  // A chosen paper replaces the general "Like IB papers" section: its rules are the style.
+  const styleSection = opts.style === "ib" && !paper ? paperStyleSection(opts.course, opts.level) : "";
+  const total = paperTotal(size, paper);
   const who = courseLabel || "an IB Diploma course";
   const extendedRule = extended
     ? "- End with one extended-response item (Discuss/Evaluate/To what extent, 6–9 marks) marked with " +
       'markbands (`type` "markbands": 3–4 bands from low to high, mark ranges like "1–3", descriptors about ' +
       "knowledge, application, balance and a supported conclusion) plus `indicative` content points.\n"
     : "- No extended-response items.\n";
+  const structure = paper
+    ? "- Each question begins with its command term (or, for Spanish, its Spanish instruction verb). Put the total marks only in `marks`; " +
+      "parts of a structured item may show their own marks in brackets.\n" +
+      '- `type` "points" markschemes list each creditworthy point with its marks (`marks` caps the total); use `notes` for accept/reject/OWTTE guidance.\n'
+    : maths
+      ? "- Start with short Section A style items (1–7 marks), then longer multi-part Section B style items.\n" +
+        "- Each question begins with its instruction word (Find, Solve, Show that, ...). Put marks only in `marks`, not in the text.\n"
+      : "- Start with short objective-1 items (State/Define/Identify/List, 1–2 marks), then objective-2/3 " +
+        "structured items (Outline/Describe/Explain/Distinguish/Compare/Analyse/Suggest/Trace/Calculate, " +
+        "2–6 marks).\n" +
+        extendedRule +
+        "- Each question begins with its command term, and the number of creditworthy points fits the marks " +
+        "(a [3] Explain needs linked reasons, not three facts). Put marks only in `marks`, not in the text.\n" +
+        '- Analytic markschemes (`type` "points") list each creditworthy point with its marks; there may be ' +
+        'more points than marks ("award [1] for any of…"), and `marks` caps the total. Use `notes` for ' +
+        "accept/reject/OWTTE guidance.\n" +
+        "- Give a question a short scenario or stem when the IB would, inside `question`.\n";
+  const size_ = paper?.unit
+    ? `made of ${UNIT_COUNT[size] ?? 1} ${paper.unit.name}${(UNIT_COUNT[size] ?? 1) > 1 ? "s" : ""} of ${paper.unit.marks} marks each (about ${total} marks in total)`
+    : `worth about ${total} marks in total`;
   const out = await generateJson<Rec>(
-    EXAMINER(),
-    `Passages:\n\n${passagesPrompt(ps)}\n\nWrite an exam-style question set for ${who} worth about ` +
-      `${total} marks in total, testing only content in the passages. Build it like a real IB paper section:\n` +
-      "- Start with short objective-1 items (State/Define/Identify/List, 1–2 marks), then objective-2/3 " +
-      "structured items (Outline/Describe/Explain/Distinguish/Compare/Analyse/Suggest/Trace/Calculate, " +
-      "2–6 marks).\n" +
-      extendedRule +
-      "- Each question begins with its command term, and the number of creditworthy points fits the marks " +
-      "(a [3] Explain needs linked reasons, not three facts). Put marks only in `marks`, not in the text.\n" +
-      '- Analytic markschemes (`type` "points") list each creditworthy point with its marks; there may be ' +
-      'more points than marks ("award [1] for any of…"), and `marks` caps the total. Use `notes` for ' +
-      "accept/reject/OWTTE guidance.\n" +
-      "- Give a question a short scenario or stem when the IB would, inside `question`.\n" +
+    EXAMINER(profile),
+    `Passages:\n\n${passagesPrompt(ps)}\n\nWrite an exam-style question set for ${who} ${size_}, testing only content in the passages. Build it like a real IB paper section:\n` +
+      structure +
       "`cite` lists the passage numbers each question is based on." +
+      examProfileRules(profile, { calculator: opts.calculator, paper: paper?.id, language: opts.language }) +
+      styleSection +
       focusLine(focus),
-    EXAM_SCHEMA,
+    examSchema(paper),
     { ctx, tag: "exam" },
   );
-  const questions = (out.questions ?? []).map((x: Rec) => cleanQuestion(x, ps.length)).filter(Boolean) as Rec[];
+  const questions = shareStems(
+    (out.questions ?? []).map((x: Rec) => cleanQuestion(x, ps.length, profile, { paper })).filter(Boolean) as Rec[],
+    paper,
+  );
   if (!questions.length) throw new GeminiError("Gemini didn't produce usable questions. Try again.");
   return {
     title: out.title || "Exam practice",
@@ -174,18 +318,33 @@ export async function draftMarkscheme(
   marks: number,
   courseLabel: string,
   ctx: string,
+  opts: { course?: string | null; calculator?: Calculator | null; paper?: string | null } = {},
 ) {
+  const profile = examProfile(opts.course);
+  const maths = profile.markingStyle === "maths";
+  const paper = examPaper(profile, opts.paper);
+  // A criterion-marked task is out of the sum of its criteria, whatever marks were typed.
+  if (paper?.criteria) marks = paper.criteria.reduce((s, c) => s + c.max, 0);
   const out = await generateJson<Rec>(
-    EXAMINER(),
+    EXAMINER(profile),
     `Passages:\n\n${passagesPrompt(ps)}\n\nWrite the markscheme for this ${courseLabel || "IB"} ` +
       `question worth [${marks}], using the passages as the content source (accurate general subject ` +
       `knowledge only where they are silent):\n\n<question>\n${question}\n</question>\n\n` +
       "Return a single-item `questions` array: copy the question text, identify its command term, set " +
-      `\`marks\` to ${marks}, and use markbands only for an extended Discuss/Evaluate/To-what-extent item.`,
+      `\`marks\` to ${marks}, and ` +
+      (paper?.criteria
+        ? 'write the markscheme as `type` "criteria" with band descriptors for each criterion (and `indicative` content); `points` stays empty.'
+        : maths
+          ? "write the markscheme as M1/A1/R1/AG lines (lines sum to the marks; AG is 0), never markbands."
+          : (paper ? paper.allowsExtended : profile.allowsExtended)
+            ? "use markbands only for an extended Discuss/Evaluate/To-what-extent item."
+            : "use an analytic points markscheme (no markbands).") +
+      examProfileRules(profile, { calculator: opts.calculator }) +
+      paperMarkingRules(profile, paper?.id),
     EXAM_SCHEMA,
     { ctx, geminiOnly: true, tag: "markscheme", thinking: "medium" },
   );
-  const qs = (out.questions ?? []).map((x: Rec) => cleanQuestion(x, ps.length)).filter(Boolean) as Rec[];
+  const qs = (out.questions ?? []).map((x: Rec) => cleanQuestion(x, ps.length, profile, { paper })).filter(Boolean) as Rec[];
   if (!qs.length) throw new GeminiError("Couldn't build a markscheme for that question. Try rephrasing it.");
   const q = { ...qs[0], question: question.trim(), marks };
   return { title: question.trim().split("\n")[0].slice(0, 80), questions: [q], total: marks };
@@ -194,7 +353,19 @@ export async function draftMarkscheme(
 function schemeText(q: Rec): string {
   const ms = q.markscheme;
   let text: string;
-  if (ms.type === "markbands") {
+  if (ms.type === "criteria") {
+    text =
+      "Criteria (mark each separately, best-fit band):\n" +
+      (ms.criteria ?? [])
+        .map(
+          (c: Rec) =>
+            `Criterion ${c.code} ${c.name} [0-${c.max}]` +
+            (c.descriptors?.length ? ":\n" + c.descriptors.map((d: Rec) => `  - [${d.marks}] ${d.descriptor}`).join("\n") : ""),
+        )
+        .join("\n");
+    if (ms.indicative?.length)
+      text += "\nIndicative content (possible, not required):\n" + ms.indicative.map((x: string) => `- ${x}`).join("\n");
+  } else if (ms.type === "markbands") {
     text = "Markbands:\n" + ms.markbands.map((b: Rec) => `- [${b.marks}] ${b.descriptor}`).join("\n");
     if (ms.indicative?.length)
       text += "\nIndicative content (not exhaustive):\n" + ms.indicative.map((x: string) => `- ${x}`).join("\n");
@@ -207,24 +378,43 @@ function schemeText(q: Rec): string {
   return text;
 }
 
-export async function markAnswer(question: Rec, answer: string, courseLabel: string) {
+export async function markAnswer(question: Rec, answer: string, courseLabel: string, course?: string | null) {
   const term = question.command_term ?? "";
+  const profile = examProfile(course);
+  const maths = profile.markingStyle === "maths";
+  const ms = question.markscheme;
+  const criteria = ms.type === "criteria";
+  const paper = examPaper(profile, question.paper);
   const out = await generateJson<Rec>(
-    MARKING_RULES + "\nYou cannot see diagrams or sketches: never expect one in an answer; judge what the words, numbers and equations say.\nGive feedback a student can act on, in the second person, briefly.",
-    `Course: ${courseLabel || "IB Diploma"}\nQuestion [${question.marks}]: ${question.question}\n` +
-      `Command term: ${term} (${COMMAND_TERMS[term]?.[1] ?? ""})\n\n${schemeText(question)}\n\n` +
+    MARKING_RULES +
+      markingStyleRules(profile) +
+      paperMarkingRules(profile, question.paper) +
+      "\nYou cannot see diagrams or sketches: never expect one in an answer; judge what the words, numbers and equations say.\nGive feedback a student can act on, in the second person, briefly.",
+    `Course: ${courseLabel || "IB Diploma"}\n` +
+      (paper ? `Paper: ${paper.tag}\n` : "") +
+      (question.stem ? `Text the question refers to:\n<text>\n${question.stem}\n</text>\n` : "") +
+      `Question [${question.marks}]: ${question.question}\n` +
+      `Command term: ${term} (${COMMAND_TERMS[term]?.[1] ?? MATHS_TERMS[term] ?? ""})\n\n${schemeText(question)}\n\n` +
       `Student answer:\n<answer>\n${answer.trim()}\n</answer>\n\n` +
-      "Mark it. For analytic schemes, return one `points` entry per markscheme point (its index, marks " +
-      "awarded from 0 to its value, and a short comment pinpointing what earned or missed it). For markbands, " +
-      "set `band` to the chosen band's mark range, set `marks_awarded`, explain the placement in " +
-      "`strengths`/`improvements`, and leave `points` empty. `model_answer` is a concise answer that would " +
-      "earn full marks.",
+      (criteria
+        ? "Mark it by criteria. Return one `criteria` entry per criterion (its `code`, the marks `awarded` from 0 to its maximum, the `band` " +
+          "range you placed it in, a short `comment` saying why, and `next`: what would reach the next band). Leave `points` empty and set " +
+          "`marks_awarded` to the sum. " +
+          (paper?.id === "writing" ? "List the language mistakes in `mistakes` (the student's words, the corrected Spanish, a short English note). " : "") +
+          "`strengths` and `improvements` summarise the whole answer. `model_answer` is a concise model that would earn top marks"
+        : "Mark it. For analytic schemes, return one `points` entry per markscheme point (its index, marks " +
+          "awarded from 0 to its value, and a short comment pinpointing what earned or missed it" +
+          (maths ? ", referring to the line's label, e.g. \"M1 earned: correct substitution\"" : "") + "). For markbands, " +
+          "set `band` to the chosen band's mark range, set `marks_awarded`, explain the placement in " +
+          "`strengths`/`improvements`, and leave `points` empty. `model_answer` is a concise answer that would " +
+          "earn full marks") +
+      ".",
     MARK_SCHEMA,
     { geminiOnly: true, tag: "exam-mark", thinking: "medium" },
   );
   const max = question.marks;
-  const ms = question.markscheme;
   let points: { index: number; awarded: number; comment: string }[] = [];
+  let crit: { code: string; name: string; awarded: number; max: number; band: string; comment: string; next: string }[] = [];
   let awarded: number;
   if (ms.type === "points") {
     const byIndex = new Map<number, Rec>();
@@ -234,17 +424,40 @@ export async function markAnswer(question: Rec, answer: string, courseLabel: str
       return { index: i, awarded: Math.max(0, Math.min(p.marks, Math.trunc(got.awarded || 0))), comment: str(got.comment) };
     });
     awarded = Math.min(max, points.reduce((s, p) => s + p.awarded, 0));
+  } else if (criteria) {
+    // Each criterion is capped at its own maximum; the total is their sum.
+    crit = (ms.criteria ?? []).map((c: Rec) => {
+      const got = (out.criteria ?? []).find((x: Rec) => str(x.code).toUpperCase() === c.code) ?? {};
+      return {
+        code: c.code,
+        name: c.name,
+        awarded: Math.max(0, Math.min(c.max, Math.trunc(got.awarded || 0))),
+        max: c.max,
+        band: str(got.band),
+        comment: str(got.comment),
+        next: str(got.next),
+      };
+    });
+    awarded = Math.min(max, crit.reduce((s, c) => s + c.awarded, 0));
   } else {
     awarded = Math.max(0, Math.min(max, Math.trunc(out.marks_awarded || 0)));
   }
   if (!answer.trim()) {
     awarded = 0;
     points = points.map((p) => ({ ...p, awarded: 0 }));
+    crit = crit.map((c) => ({ ...c, awarded: 0 }));
   }
+  const mistakes = ((out.mistakes ?? []) as Rec[])
+    .filter((m) => str(m.text) && str(m.correction))
+    .slice(0, 8)
+    .map((m) => ({ text: str(m.text), correction: str(m.correction), note: str(m.note) }));
   return {
     marks_awarded: awarded,
     max_marks: max,
     points,
+    // Per-criterion marks (English, Spanish writing); empty for point- and band-marked questions.
+    criteria: crit,
+    mistakes,
     band: str(out.band),
     strengths: str(out.strengths),
     improvements: str(out.improvements),

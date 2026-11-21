@@ -105,3 +105,9 @@ export const AskIcon = (p: SVGProps<SVGSVGElement>) => (
     <circle cx="12" cy="14.2" r=".4" fill="currentColor" />
   </svg>
 );
+
+export const BackIcon = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <path d="M19 12H5M11 6l-6 6 6 6" />
+  </svg>
+);

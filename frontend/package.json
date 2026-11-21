@@ -14,10 +14,18 @@
     "test:style": "tsx scripts/style-test.mts",
     "test:search": "tsx scripts/search-test.mts",
     "test:reuse": "tsx scripts/reuse-test.mts",
+    "test:cards": "tsx scripts/cards-test.mts",
     "test:providers": "tsx scripts/providers-test.mts",
     "test:answers": "tsx scripts/answer-test.mts",
     "test:reflow": "tsx scripts/reflow-test.mts",
-    "test:ib": "tsx scripts/ib-test.mts"
+    "test:ib": "tsx scripts/ib-test.mts",
+    "test:cite": "tsx scripts/cite-narrow-test.mts",
+    "test:aipages": "tsx scripts/aipages-test.mts",
+    "test:paste": "tsx scripts/paste-test.mts",
+    "test:nav": "tsx scripts/nav-test.mts",
+    "typecheck": "tsc --noEmit",
+    "calibrate": "tsx scripts/calibrate.mts",
+    "test:all": "npm run typecheck && npm run test:sync && npm run test:theme && npm run test:style -- --components && npm run test:search && npm run test:reuse && npm run test:cards &&npm run test:providers && npm run test:answers && npm run test:reflow && npm run test:ib && npm run test:cite && npm run test:aipages && npm run test:paste && npm run test:nav"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

@@ -1,5 +1,5 @@
 import { localApi, streamChat as localStreamChat } from "./local/store";
-import type { Thread } from "./threads";
+import type { AskImage, Thread } from "./threads";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 /** "local" (default): everything on this device + Gemini with the student's key (phone app/PWA).
@@ -33,12 +33,32 @@ export type Source = {
   can_retry?: boolean;
   /** Share (0-1) of chunks with on-device vectors; absent when complete (local engine only). */
   search_progress?: number;
+  /** A PDF with no text layer: its pages are blank until read with AI (local engine only). */
+  no_text_layer?: boolean;
+  /** How many pages have an AI reading (local engine only). */
+  ai_page_count?: number;
 };
 
 export type PageSpan = { page: number; start: number; end: number };
 
 export { KIND_LABEL, pageLabel } from "./labels";
-export type SourceDetail = Source & { text: string; pages: PageSpan[] };
+export type SourceDetail = Source & {
+  text: string;
+  pages: PageSpan[];
+  /** "Read this page with AI" results: `text.slice(start, end)` is that page's reading. Appended after the extracted text. */
+  ai_pages?: PageSpan[];
+};
+
+/** Progress of a "Read pages with AI" run (local engine only). */
+export type PageReadStatus = {
+  state: "running" | "failed" | "done";
+  /** Pages still to read; a failed run resumes with these. */
+  pending: number[];
+  total: number;
+  done: number;
+  stage: string;
+  error: string | null;
+};
 
 export type Citation = {
   source_id: number;
@@ -74,6 +94,14 @@ export type GenerateRequest = {
   page_from?: number | null;
   page_to?: number | null;
   extended?: boolean;
+  /** Exams: "ib" writes in the style of the course's IB papers (content still from the sources). */
+  style?: "sources" | "ib";
+  /** Exams for maths courses: calculator allowed (Paper 2 style) or not (Paper 1 style). */
+  calculator?: "allowed" | "none";
+  /** Exams: the paper style (an id from the course's `EXAM_PROFILE.papers`), kept for Retry and "make another". */
+  paper?: string;
+  /** Exams, programming papers: the language the code is written in. */
+  language?: "python" | "java";
   types?: ("mcq" | "short" | "long")[];
   /** Quizzes: question stems of the quiz this one should differ from (ignored by generators that do not read it). */
   avoid?: string[];
@@ -93,6 +121,11 @@ export type ArtifactSummary = {
     source_ids?: number[];
     page_from?: number | null;
     page_to?: number | null;
+    extended?: boolean;
+    style?: "sources" | "ib";
+    calculator?: "allowed" | "none";
+    paper?: string;
+    language?: "python" | "java";
   };
   created_at: string;
   has_audio: boolean;
@@ -124,10 +157,18 @@ export type ExamQuestion = {
   question: string;
   marks: number;
   cite: number[];
+  /** The paper style it was written for (older questions have none). */
+  paper?: string;
+  /** A text shared by this and the following questions (data extract, Spanish reading text, English excerpt). */
+  stem?: string;
+  /** Spanish: English translation of the instructions. */
+  gloss?: string;
   markscheme: {
-    type: "points" | "markbands";
+    type: "points" | "markbands" | "criteria";
     points: MarkschemePoint[];
     markbands: Markband[];
+    /** Criterion-marked tasks only (older questions have none). */
+    criteria?: { code: string; name: string; max: number; descriptors: Markband[] }[];
     indicative: string[];
     notes: string;
   };
@@ -136,6 +177,10 @@ export type MarkResult = {
   marks_awarded: number;
   max_marks: number;
   points: { index: number; awarded: number; comment: string }[];
+  /** Per-criterion marks for criterion-marked tasks; absent on older results. */
+  criteria?: { code: string; name: string; awarded: number; max: number; band: string; comment: string; next: string }[];
+  /** Spanish writing: language mistakes with corrections; absent on older results. */
+  mistakes?: { text: string; correction: string; note: string }[];
   band: string;
   strengths: string;
   improvements: string;
@@ -252,7 +297,7 @@ const serverApi = {
   ibOptions: () => fetch(`${API_URL}/ib/options`).then((r) => json<IBOptions>(r)),
   markQuestion: (examId: number, qi: number, answer: string) =>
     send(`/artifacts/${examId}/questions/${qi}/mark`, "POST", { answer }).then((r) => json<MarkResult>(r)),
-  customQuestion: (subjectId: number, body: { question: string; marks: number; answer: string; source_ids: number[] }) =>
+  customQuestion: (subjectId: number, body: { question: string; marks: number; answer: string; source_ids: number[]; calculator?: "allowed" | "none"; paper?: string }) =>
     send(`/subjects/${subjectId}/exam/custom`, "POST", body).then((r) => json<ArtifactDetail>(r)),
   deleteSubject: (id: number) => send(`/subjects/${id}`, "DELETE").then((r) => json<void>(r)),
   sources: (subjectId: number) => fetch(`${API_URL}/subjects/${subjectId}/sources`).then((r) => json<Source[]>(r)),
@@ -268,6 +313,13 @@ const serverApi = {
   threads: async (_subjectId: number): Promise<Thread[]> => [],
   saveThread: async (_subjectId: number, _t: Thread): Promise<void> => {},
   deleteThread: async (_uid: string): Promise<void> => {},
+  /** Ask AI photos and voice (phone and web app only). */
+  saveAskImages: async (_files: Blob[]): Promise<AskImage[]> => {
+    throw new Error("Photo questions are only available in the phone and web app.");
+  },
+  transcribeVoice: async (_audio: Blob): Promise<string> => {
+    throw new Error("Voice questions are only available in the phone and web app.");
+  },
   /** The laptop server reads PDFs only; other formats are read by the on-device (phone/web) version. */
   addFile: (subjectId: number, file: File, onUpload?: (fraction: number) => void) =>
     /\.pdf$/i.test(file.name) || file.type === "application/pdf"
@@ -297,6 +349,15 @@ const serverApi = {
     fetch(`${API_URL}/artifacts/${deckId}/review`).then((r) => json<{ cards: CardItem[]; next_due_at: string | null }>(r)),
   gradeCard: (cardId: number, grade: Grade) =>
     send(`/cards/${cardId}/review`, "POST", { grade }).then((r) => json<CardItem>(r)),
+  addCard: async (_deckId: number, _card: { front: string; back: string }): Promise<CardItem> => {
+    throw new Error("Editing cards is only available in the phone and web app.");
+  },
+  updateCard: async (_cardId: number, _card: { front: string; back: string }): Promise<CardItem> => {
+    throw new Error("Editing cards is only available in the phone and web app.");
+  },
+  deleteCard: async (_cardId: number): Promise<void> => {
+    throw new Error("Editing cards is only available in the phone and web app.");
+  },
   resetDeck: (deckId: number) => send(`/artifacts/${deckId}/reset`, "POST").then((r) => json<void>(r)),
   submitAttempt: (quizId: number, answers: (number | string | null)[], _retryAttemptId?: number) =>
     send(`/artifacts/${quizId}/attempts`, "POST", { answers }).then((r) => json<QuizResult>(r)),
@@ -335,6 +396,15 @@ const serverApi = {
   attachPdf: async (_id: number, _file: Blob): Promise<void> => {
     throw new Error("Page view is only available in the phone and web app.");
   },
+  /** Reading pages with AI is on-device only. */
+  hasPdf: async (_id: number): Promise<boolean> => false,
+  readPagesWithAI: async (_id: number, _from: number, _to?: number, _opts?: { replace?: boolean }): Promise<PageReadStatus> => {
+    throw new Error("Reading pages with AI is only available in the phone and web app.");
+  },
+  pageReadStatus: async (_id: number): Promise<PageReadStatus | null> => null,
+  retryPageRead: async (_id: number): Promise<PageReadStatus> => {
+    throw new Error("Reading pages with AI is only available in the phone and web app.");
+  },
 };
 
 /** Read mode can show the real PDF pages (needs the original file kept on the device). */
@@ -346,11 +416,13 @@ export type ChatPayload = {
   message: string;
   source_ids: number[];
   selection?: { source_id: number; text: string; start: number; end: number } | null;
-  history?: { role: "user" | "assistant"; content: string }[];
+  history?: { role: "user" | "assistant"; content: string; /** ids of photos on an earlier user turn (local engine) */ images?: string[] }[];
   /** "general": Ask AI's "Ask anything" (no sources, no citations). Default: from the checked sources. */
   mode?: "sources" | "general";
   /** Skip the saved-answer replay (a retry after an error must ask the AI again). */
   fresh?: boolean;
+  /** Photos attached to this question (local engine): ids of the full images saved by `api.saveAskImages`. */
+  images?: string[];
 };
 
 /** Ask a question and invoke `onEvent` for each event (sources, text, cite, error, done) as it arrives. */

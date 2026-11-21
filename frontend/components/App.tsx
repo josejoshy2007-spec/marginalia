@@ -9,7 +9,7 @@ import { applyTheme } from "@/lib/theme";
 import SettingsSheet from "./SettingsSheet";
 import { useSyncStatus } from "./DriveSync";
 import { startAutoSync } from "@/lib/local/sync";
-import { addCitations, forRetry, newThreadId, stripCites, threadTitle, type Anchor, type Thread, type Turn } from "@/lib/threads";
+import { addCitations, forRetry, newThreadId, stripCites, threadTitle, type Anchor, type AskImage, type Thread, type Turn } from "@/lib/threads";
 import Rail, { MODES, type Mode } from "./Rail";
 import AskMode from "./AskMode";
 import LibraryMode from "./LibraryMode";
@@ -18,10 +18,14 @@ import CommandBar from "./CommandBar";
 import ResponseSheet from "./ResponseSheet";
 import PracticeMode from "./PracticeMode";
 import ListenMode from "./ListenMode";
-import { ConfirmHost } from "@/lib/confirm";
+import { ConfirmHost, dismissConfirm } from "@/lib/confirm";
+import { NavContext } from "@/lib/nav";
+import { canGoBack, createNav, goBack, historyOp, locKey, pushLocation, replaceLocation, sanitizeLoc, skipMissing, type Nav, type NavLoc } from "@/lib/nav-history";
+import { BackIcon } from "./icons";
 import SummariseMode from "./SummariseMode";
 
-export type Focus = { sourceId: number; start: number; end: number; nonce: number };
+/** A citation click: the cited chunk, plus the answer sentence it supports (ReadMode narrows the chunk to one sentence). */
+export type Focus = { sourceId: number; start: number; end: number; nonce: number; claim?: string };
 
 const LS_SUBJECT = "marginalia.subject";
 
@@ -53,6 +57,26 @@ export default function App() {
     startAutoSync();
   }, []);
   const sync = useSyncStatus();
+
+  // ---- universal Back: an in-memory stack of locations (lib/nav-history.ts), mirrored in the browser history ----
+  const [sub, setSubState] = useState<Record<string, unknown>>({});
+  const setSub = useCallback((k: string, v: unknown) => {
+    setSubState((s) => {
+      if (v === undefined) {
+        if (!(k in s)) return s;
+        const n = { ...s };
+        delete n[k];
+        return n;
+      }
+      return JSON.stringify(s[k]) === JSON.stringify(v) ? s : { ...s, [k]: v };
+    });
+  }, []);
+  const [restoreSub, setRestoreSub] = useState<{ sub: Record<string, unknown> } | null>(null);
+  const navRef = useRef<Nav<NavLoc>>(createNav<NavLoc>());
+  const seqRef = useRef(0); // sequence number stored in each browser history entry
+  const restoring = useRef<NavLoc | null>(null);
+  const restoreTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [canBack, setCanBack] = useState(false);
 
   // ---- data loading ----
   const refreshSubjects = useCallback(async () => {
@@ -123,6 +147,7 @@ export default function App() {
     setAskActiveId(null);
     setSheetOpen(false);
     setReadSourceId(null);
+    if (restoring.current?.subjectId === subjectId) setReadSourceId(restoring.current.readSourceId);
     refreshSources();
     threadsSubject.current = null;
     let stale = false;
@@ -131,6 +156,10 @@ export default function App() {
       saved.current = new Map(ts.map((t) => [t.id, signature(t)]));
       threadsSubject.current = subjectId;
       setThreads(ts);
+      if (restoring.current?.subjectId === subjectId) {
+        setAskActiveId(restoring.current.askActiveId);
+        restoring.current = null;
+      }
     });
     return () => {
       stale = true;
@@ -151,9 +180,147 @@ export default function App() {
     }
   }, [threads]);
 
+  const loc: NavLoc = {
+    mode,
+    subjectId,
+    readSourceId,
+    askActiveId,
+    focus: focus ? { sourceId: focus.sourceId, start: focus.start, end: focus.end, claim: focus.claim } : null,
+    sub,
+  };
+  const locSig = locKey(loc);
+  const locRef = useRef(loc);
+  locRef.current = loc;
+  // A real navigation (not a re-render, not the same place twice) pushes one entry; bursts of state
+  // changes from one action collapse into one location.
+  useEffect(() => {
+    if (restoring.current) return;
+    const t = setTimeout(() => {
+      if (restoring.current) return;
+      const l = locRef.current;
+      const before = navRef.current;
+      if (before.cur && before.cur.subjectId == null) {
+        navRef.current = replaceLocation(before, l); // first data load, not a navigation
+        return;
+      }
+      const next = pushLocation(before, l, locKey);
+      if (next === before) return;
+      const op = historyOp(before);
+      navRef.current = next;
+      if (op === "push") seqRef.current += 1; // else the entry is replaced: browser and app stacks stay equal
+      try {
+        const st = { ...(history.state ?? {}), marg: seqRef.current };
+        if (op === "push") history.pushState(st, "");
+        else history.replaceState(st, "");
+      } catch {}
+      setCanBack(canGoBack(next));
+    }, 0);
+    return () => clearTimeout(t);
+  }, [locSig]);
+
+  const finishRestore = useCallback(() => {
+    if (restoreTimer.current) clearTimeout(restoreTimer.current);
+    restoreTimer.current = null;
+    if (!restoring.current) return;
+    restoring.current = null;
+    setRestoreSub(null);
+    // Make the stack's current entry match what is really showing.
+    navRef.current = replaceLocation(navRef.current, locRef.current);
+  }, []);
+  // The restore ends when the live location reaches the target (a timeout is only the fallback).
+  useEffect(() => {
+    const t = restoring.current;
+    if (t && locKey(t) === locSig) {
+      if (restoreTimer.current) clearTimeout(restoreTimer.current);
+      restoreTimer.current = null;
+      restoring.current = null;
+      setRestoreSub(null);
+    }
+  }, [locSig]);
+
+  const restore = useCallback((l0: NavLoc) => {
+    const sameSubject = l0.subjectId === subjectIdRef.current || l0.subjectId == null;
+    const l = sanitizeLoc(l0, {
+      subjectIds: (subjectsRef.current ?? []).map((x) => x.id),
+      sourceIds: sameSubject ? sourcesRef.current.map((x) => x.id) : undefined,
+      threadIds: sameSubject ? threadsRef.current.map((x) => x.id) : undefined,
+    });
+    if (restoreTimer.current) clearTimeout(restoreTimer.current);
+    restoring.current = l;
+    setMode(l.mode as Mode);
+    setSheetOpen(false);
+    setFocus(l.focus ? { ...l.focus, nonce: Date.now() } : null);
+    setReadSourceId(l.readSourceId);
+    setAskActiveId(l.askActiveId);
+    setRestoreSub({ sub: l.sub });
+    if (!sameSubject) setSubjectId(l.subjectId);
+    // Nothing may change (already there): finish soon. Otherwise wait for the location to match, with a fallback.
+    restoreTimer.current = setTimeout(finishRestore, sameSubject && locKey(l) === locKey(locRef.current) ? 60 : 5000);
+  }, [finishRestore]);
+
+  const overlays = useRef({ settings: false, sheet: false });
+  overlays.current = { settings: settings === "open", sheet: sheetOpen && mode !== "read" && mode !== "ask" };
+  const subjectIdRef = useRef(subjectId);
+  subjectIdRef.current = subjectId;
+  const subjectsRef = useRef(subjects);
+  subjectsRef.current = subjects;
+  const sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
+  const threadsRef = useRef(threads);
+  threadsRef.current = threads;
+  /** Back closes the topmost overlay before it goes anywhere. */
+  const closeOverlay = useCallback((): boolean => {
+    if (dismissConfirm()) return true;
+    if (overlays.current.settings) return setSettings(null), true;
+    if (overlays.current.sheet) return setSheetOpen(false), true;
+    return false;
+  }, []);
+  const goBackOne = useCallback(() => {
+    if (closeOverlay()) return;
+    if (canGoBack(navRef.current)) history.back(); // popstate does the restoring
+  }, [closeOverlay]);
+
+  useEffect(() => {
+    try {
+      history.replaceState({ ...(history.state ?? {}), marg: 0 }, "");
+    } catch {}
+    const onPop = (e: PopStateEvent) => {
+      const seq = e.state?.marg;
+      if (typeof seq !== "number" || seq >= seqRef.current) return; // not ours, or Forward
+      if (closeOverlay()) {
+        // Back was spent on the overlay: put the entry back so the location stays.
+        try {
+          history.pushState({ ...(history.state ?? {}), marg: seqRef.current }, "");
+        } catch {}
+        return;
+      }
+      let next = goBack(navRef.current, seqRef.current - seq);
+      if (subjectsRef.current) next = skipMissing(next, subjectsRef.current.map((x) => x.id));
+      const target = next.back.length; // browser entry index == stack depth
+      const extra = seq - target;
+      seqRef.current = target;
+      if (extra > 0) {
+        try {
+          history.go(-extra); // drop browser entries for the skipped (deleted) locations
+        } catch {}
+      }
+      if (next === navRef.current) return;
+      navRef.current = next;
+      setCanBack(canGoBack(next));
+      if (next.cur) restore(next.cur);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [closeOverlay, restore]);
+
   // Alt+1..6 switches modes (each mode's key is shown in the rail).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === "ArrowLeft") {
+        e.preventDefault();
+        goBackOne();
+        return;
+      }
       const hit = e.altKey ? MODES.find((m) => m.key === e.key) : undefined;
       if (hit) {
         e.preventDefault();
@@ -162,7 +329,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [goBackOne]);
 
   // While a recording is being transcribed, poll so the progress bar moves and it turns "ready".
   const transcribing = sources.some((s) => s.status === "processing");
@@ -201,13 +368,13 @@ export default function App() {
   );
 
   const ask = useCallback(
-    async (thread: Thread, message: string, fresh = false) => {
+    async (thread: Thread, message: string, fresh = false, images?: AskImage[]) => {
       if (subjectId == null || thread.busy) return;
       const sid = subjectId;
       const general = thread.mode === "general";
       const history = thread.turns.map((t) =>
         t.role === "user"
-          ? { role: "user" as const, content: t.text }
+          ? { role: "user" as const, content: t.text, ...(t.images?.length ? { images: t.images.map((i) => i.id) } : {}) }
           : { role: "assistant" as const, content: stripCites(t.body) },
       );
       const selection =
@@ -223,7 +390,7 @@ export default function App() {
         busy: true,
         createdAt: thread.createdAt ?? stamp,
         updatedAt: stamp,
-        turns: [...thread.turns, { role: "user", text: message }, { role: "assistant", body: "", citations: [] }],
+        turns: [...thread.turns, { role: "user", text: message, ...(images?.length ? { images } : {}) }, { role: "assistant", body: "", citations: [] }],
       };
       if (thread.kind === "ask" && !thread.title) cur = { ...cur, title: threadTitle(cur) };
       setThreads((ts) => (ts.some((t) => t.id === thread.id) ? ts.map((t) => (t.id === thread.id ? cur : t)) : [...ts, cur]));
@@ -247,6 +414,7 @@ export default function App() {
             history,
             mode: general ? "general" : "sources",
             fresh,
+            ...(images?.length ? { images: images.map((i) => i.id) } : {}),
           },
           (e) => {
             if (e.type === "text") lastTurn((t) => ({ ...t, body: t.body + e.text }));
@@ -292,11 +460,11 @@ export default function App() {
     [],
   );
 
-  const onCite = useCallback((c: Citation) => {
+  const onCite = useCallback((c: Citation, claim?: string) => {
     setReadSourceId(c.source_id);
     setMode("read");
     setSheetOpen(false);
-    setFocus({ sourceId: c.source_id, start: c.start, end: c.end, nonce: Date.now() });
+    setFocus({ sourceId: c.source_id, start: c.start, end: c.end, nonce: Date.now(), claim });
   }, []);
 
   const openInReader = useCallback((sourceId: number) => {
@@ -343,9 +511,12 @@ export default function App() {
   const sheetThread = threads.find((t) => t.kind === "sheet") ?? null;
   const readerSource = sources.find((s) => s.id === readSourceId) ?? null;
 
+  const navCtx = useMemo(() => ({ setSub, restore: restoreSub }), [setSub, restoreSub]);
+
   return (
     // .safe-frame keeps the app clear of the phone's status bar, notch and gesture bar (the Android
     // app draws edge-to-edge); in browsers the insets are 0.
+    <NavContext.Provider value={navCtx}>
     <div className="safe-frame flex h-dvh w-full overflow-hidden bg-paper text-ink">
       <Rail
         mode={mode}
@@ -356,6 +527,17 @@ export default function App() {
       />
 
       <main className="relative flex min-w-0 flex-1 flex-col">
+        {canBack && (
+          <button
+            type="button"
+            onClick={goBackOne}
+            aria-label="Back"
+            title="Back (Alt+←)"
+            className="absolute left-2 top-2 z-30 grid h-8 w-8 place-items-center rounded border border-line bg-card text-muted transition-colors hover:text-ink"
+          >
+            <BackIcon width={16} height={16} />
+          </button>
+        )}
         <div className={`min-h-0 flex-1 overflow-y-auto ${mode === "ask" ? "" : "pb-40"}`} id="mode-scroll">
           {mode === "library" && (
             <LibraryMode
@@ -403,7 +585,7 @@ export default function App() {
               onDelete={discardThread}
               onRetry={(t) => {
                 const r = forRetry(t);
-                if (r) ask(r.trimmed, r.question, true);
+                if (r) ask(r.trimmed, r.question, true, r.images);
               }}
               onCite={onCite}
               checkedCount={checkedIds.length}
@@ -472,6 +654,7 @@ export default function App() {
         />
       )}
     </div>
+    </NavContext.Provider>
   );
 }
 

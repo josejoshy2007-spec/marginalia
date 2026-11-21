@@ -2,8 +2,9 @@
  * Reading photos of handwritten work with Gemini (port of backend vision.py). Answers are
  * transcribed verbatim, mistakes included, because the text is then marked.
  */
-import { GeminiError, generateJson } from "./gemini";
+import { GeminiError, generateJson, generateText } from "./gemini";
 import type { Rec } from "./gen";
+import { geminiMime } from "./parse";
 
 const MAX_IMAGES = 6;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -120,4 +121,22 @@ export async function readQuizAnswers(files: Blob[], questions: Rec[]): Promise<
   if (answers.every((a) => a === -1 || a === null))
     throw new GeminiError('Couldn\'t read any answers in that photo. Number them like "1 B" or "3. …" and try again.');
   return answers;
+}
+
+const MAX_VOICE_BYTES = 8 * 1024 * 1024;
+
+/** A spoken question (≤2 min) to text, verbatim, for the student to check before sending. Gemini only. */
+export async function transcribeVoice(audio: Blob): Promise<string> {
+  if (!audio.size) throw new GeminiError("The recording is empty. Try again.");
+  if (audio.size > MAX_VOICE_BYTES) throw new GeminiError("That recording is too long. Keep it under 2 minutes.");
+  const mime = geminiMime(audio.type ? audio : new Blob([audio], { type: "audio/webm" }), "voice.webm");
+  const out = await generateText(
+    "You transcribe a student's spoken question about their studies exactly as spoken.",
+    "Transcribe this recording verbatim, in the language spoken. It is a question or request about the student's " +
+      "studies. Do not answer it, correct it or add anything. If there is no speech, reply with exactly: [no speech]",
+    { parts: [{ inlineData: { mimeType: mime, data: await blobToBase64(audio) } }], tag: "ask-voice" },
+  );
+  const text = out.text.trim();
+  if (!text || /^\[no speech\]$/i.test(text)) throw new GeminiError("I couldn't hear a question in that recording. Try again, a little closer to the microphone.");
+  return text;
 }

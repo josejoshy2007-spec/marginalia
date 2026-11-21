@@ -108,6 +108,19 @@ try {
     assert.deepEqual(a5, b5);
   });
 
+  // 5b. Student-written cards: an edit and an added card (A) and a deleted card (B) reach both devices.
+  await A.run("editCard", { deck: "Cells deck", front: { from: "Q2", to: "Q2 edited" }, back: "A $x^2$" });
+  await A.run("addCard", { deck: "Cells deck", front: "Q3 manual", back: "Own words" });
+  await B.run("deleteCard", { deck: "Cells deck", front: "Q1" });
+  await A.run("sync");
+  await B.run("sync");
+  await A.run("sync");
+  const [a5b, b5b] = [await A.run("state"), await B.run("state")];
+  check("edited, added and deleted cards propagate; manual card (no citation) loads", () => {
+    assert.deepEqual(a5b.Biology.decks[0].cards, ["Q2 edited:reps0", "Q3 manual:reps0"]);
+    assert.deepEqual(a5b, b5b);
+  });
+
   // 6. Deleting a deck on B removes it (and its cards/attempts) on A.
   await B.run("deleteDeck", { title: "Cells deck" });
   await B.run("sync");
@@ -174,6 +187,96 @@ try {
   await A.run("sync");
   const a11 = await A.run("conversations", { subject: "Chemistry" });
   check("deleted conversation disappears on the other device", () => assert.deepEqual(a11, ["Ionic vs covalent:sources:2"]));
+
+  // 12. A PDF source, then AI page readings appended on A: B picks up the new content revision.
+  const contentFiles = () => readdirSync(driveDir).filter((f) => f.startsWith("source-")).sort();
+  const tb = (st: any) => st.Chemistry.sources.find((x: any) => x.title === "Textbook");
+  await A.run("pdfSource", { subject: "Chemistry", title: "Textbook" });
+  await A.run("sync");
+  await B.run("sync");
+  const b12 = tb(await B.run("state"));
+  check("B has the PDF at revision 0", () => {
+    assert.equal(b12.rev, 0);
+    assert.deepEqual(b12.ai, []);
+    assert.equal(b12.chunks, 3);
+    assert.equal(b12.invariantOk, true);
+  });
+
+  const reading = "Electrons orbit the nucleus in shells: $E_n = -13.6/n^2$ eV.";
+  await A.run("aiRead", { title: "Textbook", page: 2, text: reading });
+  await A.run("sync");
+  const files13 = contentFiles();
+  await B.run("sync");
+  const [a13, b13] = [await A.run("state"), await B.run("state")];
+  check("AI reading reaches B: new revision, appended text, chunks, invariant", () => {
+    assert.equal(tb(b13).rev, 1);
+    assert.deepEqual(tb(b13).ai, [`2:${reading}`]);
+    assert.equal(tb(b13).chunks, 4);
+    assert.deepEqual(tb(b13).readingChunks, [`2:${reading}`]);
+    assert.equal(tb(b13).invariantOk, true);
+    assert.deepEqual(tb(a13), tb(b13));
+  });
+  check("the changed content is a new Drive file (.r1); the superseded revision is removed", () => {
+    assert.equal(files13.filter((f) => /\.r1(-[a-z0-9]+)?\.json\.gz$/.test(f)).length, 1, files13.join(","));
+    // Every other source keeps its plain file; the Textbook has exactly one content file, at revision 1.
+    assert.equal(files13.length, new Set(files13.map((f) => f.replace(/\.r\d+(-[a-z0-9]+)?\.json\.gz$/, ".json.gz"))).size);
+  });
+
+  // 13. Re-reading a page replaces its reading everywhere; only the newest reading of a page is indexed.
+  await A.run("aiRead", { title: "Textbook", page: 2, text: "Electrons occupy energy levels." });
+  await A.run("aiRead", { title: "Textbook", page: 3, text: "Ions form when atoms gain or lose electrons." });
+  await A.run("sync");
+  await B.run("sync");
+  const [a14, b14] = [await A.run("state"), await B.run("state")];
+  check("a re-read page and a new page reach B; superseded revisions leave Drive", () => {
+    assert.equal(tb(b14).rev, 3);
+    assert.deepEqual(tb(b14).ai, ["2:Electrons occupy energy levels.", "3:Ions form when atoms gain or lose electrons."]);
+    assert.deepEqual(tb(b14).readingChunks, ["2:Electrons occupy energy levels.", "3:Ions form when atoms gain or lose electrons."]);
+    assert.equal(tb(b14).invariantOk, true);
+    assert.deepEqual(tb(a14), tb(b14));
+    assert.ok(contentFiles().some((f) => /\.r3(-[a-z0-9]+)?\.json\.gz$/.test(f)));
+    assert.ok(!contentFiles().some((f) => /\.r1(-[a-z0-9]+)?\.json\.gz$/.test(f)));
+  });
+
+  // 14. A later, unrelated edit on a device that is behind must not undo the content revision.
+  await A.run("aiRead", { title: "Textbook", page: 1, text: "Atoms are the basic units of matter." });
+  await wait(20);
+  await B.run("setChecked", { title: "Textbook", checked: false });
+  await A.run("sync");
+  await B.run("sync");
+  await A.run("sync");
+  const [a15, b15] = [await A.run("state"), await B.run("state")];
+  check("a stale device's newer metadata edit keeps the content revision; devices converge", () => {
+    assert.equal(tb(b15).rev, 4);
+    assert.equal(tb(b15).checked, false);
+    assert.deepEqual(tb(b15).ai.map((x: string) => x.split(":")[0]), ["1", "2", "3"]);
+    assert.equal(tb(b15).invariantOk, true);
+    assert.deepEqual(tb(a15), tb(b15));
+  });
+
+  // 15. Concurrent readings: both devices read a different page of the same PDF before syncing. Neither
+  // reading may be lost, whichever device syncs first, and the result must be consistent on both.
+  for (const [title, order] of [["Lab A-first", ["A", "B", "A", "B"]], ["Lab B-first", ["B", "A", "B", "A"]]] as const) {
+    await A.run("pdfSource", { subject: "Chemistry", title });
+    await A.run("sync");
+    await B.run("sync");
+    await A.run("aiRead", { title, page: 2, text: "Reading of page two from A." });
+    await B.run("aiRead", { title, page: 3, text: "Reading of page three from B." });
+    const dev = { A, B };
+    for (const d of order) await dev[d].run("sync");
+    const [ac, bc] = [await A.run("state"), await B.run("state")];
+    const get = (st: any) => st.Chemistry.sources.find((x: any) => x.title === title);
+    check(`concurrent readings of different pages merge on both devices (${title})`, () => {
+      for (const st of [get(ac), get(bc)]) {
+        assert.deepEqual(st.ai, ["2:Reading of page two from A.", "3:Reading of page three from B."]);
+        assert.deepEqual(st.readingChunks, ["2:Reading of page two from A.", "3:Reading of page three from B."]);
+        assert.equal(st.invariantOk, true);
+        assert.equal(st.ordsUnique, true);
+        assert.equal(st.chunks, 5);
+      }
+      assert.deepEqual(get(ac), get(bc));
+    });
+  }
 
   console.log(`\nALL ${passed} SYNC CHECKS PASSED`);
 } finally {

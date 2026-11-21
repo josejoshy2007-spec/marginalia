@@ -3,17 +3,19 @@
 import { Fragment, type ReactNode } from "react";
 import katex from "katex";
 import type { Citation } from "@/lib/api";
+import { claimBefore } from "@/lib/cite-narrow";
 
 type Props = {
   body: string;
   citations: Citation[];
-  onCite: (c: Citation) => void;
+  /** `claim` is the answer sentence the marker belongs to, so Read mode can narrow the citation to one sentence. */
+  onCite: (c: Citation, claim?: string) => void;
   streaming?: boolean;
   /** "chat": Ask AI's reading layout (serif, larger); default: compact (sheets, margin threads). */
   variant?: "chat" | "compact";
 };
 
-type Cite = { citations: Citation[]; onCite: (c: Citation) => void };
+type Cite = { citations: Citation[]; onCite: (c: Citation, claim?: string) => void };
 
 /**
  * Markdown for AI answers that understands ⟦n⟧ citation tokens and LaTeX maths (KaTeX):
@@ -243,7 +245,7 @@ function renderInline(text: string, key: string, c: Cite): ReactNode[] {
     if (m.index > last) out.push(<Fragment key={`${key}t${i++}`}>{text.slice(last, m.index)}</Fragment>);
     const kk = `${key}x${i++}`;
     if (m[1]) {
-      const b = citeButton(m[1], kk, c);
+      const b = citeButton(m[1], kk, c, claimBefore(text, m.index));
       if (b) out.push(b);
     } else if (m[2] != null || m[3] != null) {
       // Citations right after a centred formula sit beside it rather than dropping to their own line.
@@ -254,7 +256,7 @@ function renderInline(text: string, key: string, c: Cite): ReactNode[] {
       out.push(
         <span key={kk} className="math-display">
           <span className="math-body" dangerouslySetInnerHTML={{ __html: tex((m[2] ?? m[3]).trim(), true) }} />
-          {t && <span className="math-cites">{(t[0].match(/⟦\d+⟧/g) ?? []).map((tok, j) => citeButton(tok, `${kk}c${j}`, c))}</span>}
+          {t && <span className="math-cites">{(t[0].match(/⟦\d+⟧/g) ?? []).map((tok, j) => citeButton(tok, `${kk}c${j}`, c, claimBefore(text, m!.index)))}</span>}
         </span>,
       );
       last = re.lastIndex;
@@ -275,7 +277,7 @@ function renderInline(text: string, key: string, c: Cite): ReactNode[] {
   return out;
 }
 
-function citeButton(token: string, key: string, c: Cite): ReactNode {
+function citeButton(token: string, key: string, c: Cite, claim?: string): ReactNode {
   const n = Number(token.slice(1, -1));
   const cite = c.citations[n - 1];
   if (!cite) return null;
@@ -283,7 +285,7 @@ function citeButton(token: string, key: string, c: Cite): ReactNode {
     <button
       key={key}
       type="button"
-      onClick={() => c.onCite(cite)}
+      onClick={() => c.onCite(cite, claim)}
       title={`${cite.source_title}${cite.page ? ` · ${cite.page_label ?? "p."} ${cite.page}` : ""}\n“${cite.cited_text.slice(0, 160)}”`}
       className="cite-marker"
     >

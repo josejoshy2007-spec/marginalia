@@ -20,3 +20,7 @@ OAuth client*.txt
 client_secret*.json
 
 .superpowers/
+
+# Marking calibration: real markschemes are the student's copyrighted materials
+calibration/*.json
+!calibration/example.json

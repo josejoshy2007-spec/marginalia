@@ -1,10 +1,12 @@
 "use client";
 
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, pageLabel, PDF_PAGE_VIEW, type Citation, type Source, type SourceDetail } from "@/lib/api";
-import { buildBlocks, pageAt, shouldHandleFocus, type Block } from "@/lib/reflow";
+import { api, pageLabel, PDF_PAGE_VIEW, type Citation, type PageReadStatus, type Source, type SourceDetail } from "@/lib/api";
+import { narrowCitation } from "@/lib/cite-narrow";
+import { buildSections, pageOfOffset, shouldHandleFocus, type Block } from "@/lib/reflow";
 import type { Anchor, Thread } from "@/lib/threads";
 import type { Focus } from "./App";
+import AnswerBody from "./AnswerBody";
 import MarginThread from "./MarginThread";
 import PdfPages from "./PdfPages";
 import { Segmented } from "./study/shared";
@@ -35,7 +37,8 @@ let handledFocusNonce = 0;
 export default function ReadMode(p: Props) {
   const [detail, setDetail] = useState<SourceDetail | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
-  const [flash, setFlash] = useState<{ start: number; end: number; nonce: number } | null>(null);
+  // `start..end` is the cited chunk (outlined faintly); `ns..ne` the sentence the claim rests on (flashed strongly).
+  const [flash, setFlash] = useState<{ start: number; end: number; ns: number; ne: number; narrowed: boolean; nonce: number } | null>(null);
   const docRef = useRef<HTMLDivElement>(null);
   const { source, focus, threads } = p;
 
@@ -68,6 +71,78 @@ export default function ReadMode(p: Props) {
   }, [sourceId]);
   useEffect(() => (pageView ? loadPdf() : undefined), [pageView, loadPdf]);
 
+  // "Read this page with AI": is the original PDF on this device, how is a run going, which pages show the original text.
+  const [hasPdf, setHasPdf] = useState(false);
+  const [readStatus, setReadStatus] = useState<PageReadStatus | null>(null);
+  const [readErr, setReadErr] = useState<string | null>(null);
+  const [showOriginal, setShowOriginal] = useState<Set<number>>(() => new Set());
+  useEffect(() => {
+    setShowOriginal(new Set());
+    setReadErr(null);
+    setReadStatus(null);
+  }, [sourceId]);
+  useEffect(() => {
+    setHasPdf(false);
+    if (sourceId == null || source?.kind !== "pdf") return;
+    let live = true;
+    api.hasPdf(sourceId).then((v) => live && setHasPdf(v)).catch(() => {});
+    api.pageReadStatus(sourceId).then((v) => live && setReadStatus(v)).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [sourceId, source?.kind, pdf]);
+  // Each finished page changes the text: fetch it again and keep the status current.
+  useEffect(() => {
+    if (sourceId == null || source?.kind !== "pdf") return;
+    let live = true;
+    const onRead = async (e: Event) => {
+      if ((e as CustomEvent).detail?.sourceId !== sourceId) return;
+      const [st, d] = await Promise.all([api.pageReadStatus(sourceId), api.source(sourceId).catch(() => null)]);
+      if (!live) return;
+      setReadStatus(st);
+      if (d && d.status === "ready") {
+        detailCache.set(d.id, d);
+        setDetail(d);
+      }
+    };
+    window.addEventListener("marginalia:page-read", onRead);
+    return () => {
+      live = false;
+      window.removeEventListener("marginalia:page-read", onRead);
+    };
+  }, [sourceId, source?.kind]);
+  const reading = readStatus?.state === "running";
+  const startRead = useCallback(
+    async (from: number, to: number, replace: boolean) => {
+      if (sourceId == null) return;
+      setReadErr(null);
+      try {
+        setReadStatus(await api.readPagesWithAI(sourceId, from, to, { replace }));
+      } catch (e) {
+        setReadErr((e as Error).message);
+      }
+    },
+    [sourceId],
+  );
+  const retryRead = useCallback(async () => {
+    if (sourceId == null) return;
+    setReadErr(null);
+    try {
+      setReadStatus(await api.retryPageRead(sourceId));
+    } catch (e) {
+      setReadErr((e as Error).message);
+    }
+  }, [sourceId]);
+  const toggleOriginal = useCallback(
+    (page: number) =>
+      setShowOriginal((cur) => {
+        const next = new Set(cur);
+        if (!next.delete(page)) next.add(page);
+        return next;
+      }),
+    [],
+  );
+
   // Load full text for the source being read. Only finished sources are cached: a big upload that
   // was opened while still processing has empty text, and caching that left Read mode blank.
   const ready = source?.status === "ready";
@@ -97,8 +172,21 @@ export default function ReadMode(p: Props) {
     if (!focus || !detail || focus.sourceId !== detail.id) return;
     if (!shouldHandleFocus(focus.nonce, handledFocusNonce)) return;
     handledFocusNonce = focus.nonce;
-    setFlash({ start: focus.start, end: focus.end, nonce: focus.nonce });
-    const pg = pageAt(detail.pages, focus.start);
+    // Narrow the cited chunk to the sentence the answer's claim rests on (the whole chunk if unsure).
+    const n = narrowCitation(detail.text, focus.start, focus.end, focus.claim);
+    setFlash({ start: focus.start, end: focus.end, ns: n.start, ne: n.end, narrowed: n.start !== focus.start || n.end !== focus.end, nonce: focus.nonce });
+    const pg = pageOfOffset(detail.pages, detail.ai_pages, n.start);
+    // A page that shows its AI reading hides the extracted text: show whichever one holds the citation.
+    if (pg != null && detail.ai_pages?.some((a) => a.page === pg)) {
+      const inAi = detail.ai_pages.some((a) => n.start >= a.start && n.start < a.end);
+      setShowOriginal((cur) => {
+        if (cur.has(pg) === !inAi) return cur;
+        const next = new Set(cur);
+        if (inAi) next.delete(pg);
+        else next.add(pg);
+        return next;
+      });
+    }
     if (pg != null) {
       startPage.current = pg; // Page view opens here even before any smooth scroll
       setOutline({ page: pg, nonce: focus.nonce });
@@ -129,12 +217,12 @@ export default function ReadMode(p: Props) {
     if (v === "page") {
       // Page of the first block at the top of the screen.
       const top = (document.getElementById("mode-scroll")?.getBoundingClientRect().top ?? 0) + 96;
-      let off = 0;
-      for (const el of docRef.current?.querySelectorAll<HTMLElement>("[data-p]") ?? []) {
+      let pg = 1;
+      for (const el of docRef.current?.querySelectorAll<HTMLElement>("[data-pg]") ?? []) {
         if (el.getBoundingClientRect().top > top) break;
-        off = Number(el.dataset.p);
+        pg = Number(el.dataset.pg);
       }
-      startPage.current = pageAt(detail.pages, off) ?? 1;
+      startPage.current = pg;
     } else pendingTextPage.current = pdfPageRef.current?.() ?? startPage.current;
     viewMemo.set(source.id, v);
     setOutline(null);
@@ -147,7 +235,10 @@ export default function ReadMode(p: Props) {
     const r: Range[] = [];
     for (const t of threads)
       if (t.anchor) r.push({ ...t.anchor, cls: t.id === p.activeThreadId ? "hl-anchor-active" : "hl-anchor" });
-    if (flash) r.push({ ...flash, cls: "hl-focus" });
+    if (flash) {
+      if (flash.narrowed) r.push({ start: flash.start, end: flash.end, cls: "hl-chunk" });
+      r.push({ start: flash.ns, end: flash.ne, cls: "hl-focus" });
+    }
     return r;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anchorSig, p.activeThreadId, flash]);
@@ -158,8 +249,24 @@ export default function ReadMode(p: Props) {
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
     const r = sel.getRangeAt(0);
     if (!docRef.current?.contains(r.commonAncestorContainer)) return;
-    const a = absOffset(r.startContainer, r.startOffset);
-    const b = absOffset(r.endContainer, r.endOffset);
+    let a = absOffset(r.startContainer, r.startOffset);
+    let b = absOffset(r.endContainer, r.endOffset);
+    // An AI reading is shown as rendered Markdown (no per-character offsets): anchor to the selected words when they
+    // appear verbatim in the block's source text, else to the whole block(s).
+    const blockOf = (n: Node) => ((n.nodeType === Node.TEXT_NODE ? n.parentElement : (n as HTMLElement))?.closest<HTMLElement>("[data-ai]") ?? null);
+    const [ba, bb] = [blockOf(r.startContainer), blockOf(r.endContainer)];
+    if (ba || bb) {
+      const bs = ba ? Number(ba.dataset.p) : a;
+      const be = bb ? Number(bb.dataset.pEnd) : b;
+      if (bs == null || be == null) return;
+      a = bs;
+      b = be;
+      const picked = sel.toString().trim();
+      if (ba && ba === bb && picked.length >= 3) {
+        const at = detail.text.slice(bs, be).indexOf(picked);
+        if (at >= 0) [a, b] = [bs + at, bs + at + picked.length];
+      }
+    }
     if (a == null || b == null) return;
     let [start, end] = a <= b ? [a, b] : [b, a];
     while (start < end && /\s/.test(detail.text[start])) start++;
@@ -232,6 +339,16 @@ export default function ReadMode(p: Props) {
             />
           </div>
         )}
+        {source.kind === "pdf" && detail && (
+          <PageReadPanel
+            detail={detail}
+            hasPdf={hasPdf}
+            status={readStatus}
+            error={readErr}
+            onRead={(from, to) => startRead(from, to, false)}
+            onRetry={retryRead}
+          />
+        )}
         <p className="mt-2 text-sm text-muted">
           {pageView ? "Showing the original pages. Switch to Text to select a passage and ask about it." : "Select any passage to open a thread in the margin."}
           {source.url && (
@@ -261,9 +378,15 @@ export default function ReadMode(p: Props) {
           <DocumentText
             text={detail.text}
             pages={detail.pages}
+            aiPages={detail.ai_pages}
             ranges={ranges}
             label={pageLabel(detail.kind).short}
             onReflow={onReflow}
+            canRead={hasPdf && detail.kind === "pdf"}
+            reading={reading}
+            showOriginal={showOriginal}
+            onReadPage={(pg) => startRead(pg, pg, true)}
+            onToggle={toggleOriginal}
           />
         </div>
       )}
@@ -274,6 +397,13 @@ export default function ReadMode(p: Props) {
           initialPage={startPage.current}
           outline={outline}
           currentPageRef={pdfPageRef}
+          pageAction={(n) => (
+            <ReadPageButton
+              exists={!!detail.ai_pages?.some((a) => a.page === n)}
+              busy={reading}
+              onRead={() => startRead(n, n, true)}
+            />
+          )}
           err={attachErr}
           onAttach={async (f) => {
             setAttachErr(null);
@@ -322,6 +452,7 @@ function PageViewBody({
   initialPage,
   outline,
   currentPageRef,
+  pageAction,
   err,
   onAttach,
 }: {
@@ -330,6 +461,7 @@ function PageViewBody({
   initialPage: number;
   outline: { page: number; nonce: number } | null;
   currentPageRef: { current: (() => number) | null };
+  pageAction: (n: number) => React.ReactNode;
   err: string | null;
   onAttach: (f: File) => void;
 }) {
@@ -357,7 +489,7 @@ function PageViewBody({
         {err && <p className="mt-3 text-danger">{err}</p>}
       </div>
     );
-  return <PdfPages blob={pdf} pageCount={pageCount} initialPage={initialPage} outline={outline} currentPageRef={currentPageRef} />;
+  return <PdfPages blob={pdf} pageCount={pageCount} initialPage={initialPage} outline={outline} currentPageRef={currentPageRef} pageAction={pageAction} />;
 }
 
 function Empty({ children }: { children: React.ReactNode }) {
@@ -368,58 +500,229 @@ function Empty({ children }: { children: React.ReactNode }) {
 // Display only: blocks come from lib/reflow.ts and carry absolute offsets into the untouched source text,
 // so selection, margin threads, citation flashes and highlights all keep working on `data-o` spans.
 
+const NO_CITES: Citation[] = [];
+const NOOP = () => {};
+
 const DocumentText = memo(function DocumentText({
   text,
   pages,
+  aiPages,
   ranges,
   label,
   onReflow,
+  canRead,
+  reading,
+  showOriginal,
+  onReadPage,
+  onToggle,
 }: {
   text: string;
-  pages: { page: number; start: number }[];
+  pages: { page: number; start: number; end?: number }[];
+  aiPages?: { page: number; start: number; end: number }[];
   ranges: Range[];
   label: string;
   onReflow: () => void;
+  canRead: boolean;
+  reading: boolean;
+  showOriginal: Set<number>;
+  onReadPage: (page: number) => void;
+  onToggle: (page: number) => void;
 }) {
-  const blocks = useMemo(() => buildBlocks(text, pages), [text, pages]);
+  const sections = useMemo(() => buildSections(text, pages, aiPages), [text, pages, aiPages]);
   const pageName = (n: number) => (label === "p." ? `p. ${n}` : `${label} ${n}`);
+  const firstChanged = useRef(true);
+  useEffect(() => {
+    if (firstChanged.current) firstChanged.current = false;
+    else onReflow(); // margin cards re-place themselves after a page switched between its AI reading and original text
+  }, [showOriginal, aiPages]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <article className="reading font-reading text-[1.08rem] leading-[1.75] text-ink-soft">
-      {blocks.map((b, i) => (
-        <Fragment key={b.start}>
-          {b.page !== undefined && pages.length > 0 && (
-            <div
-              data-page-sep={b.page}
-              data-p={b.start}
-              data-p-end={b.start}
-              className={`flex select-none items-center gap-3 font-sans text-[11px] tracking-wide text-muted ${i === 0 ? "mb-4" : "mb-4 mt-9"}`}
-            >
-              <span aria-hidden className="h-px flex-1 bg-line" />
-              <span>{pageName(b.page)}</span>
-              <span aria-hidden className="h-px flex-1 bg-line" />
-            </div>
-          )}
-          {b.kind === "figure" ? (
-            <FigureBlock text={text} block={b} ranges={ranges} onReflow={onReflow} />
-          ) : (
-            <div className="relative" data-p={b.start} data-p-end={b.end}>
-              {b.kind === "heading" ? (
-                <h3 className="mb-3 mt-6 font-display text-xl leading-snug text-ink">{renderSegments(text, b, ranges)}</h3>
-              ) : b.kind === "running" ? (
-                <p className="mb-2 font-sans text-xs text-muted">{renderSegments(text, b, ranges)}</p>
-              ) : (
-                <p className={b.kind === "item" ? "mb-3 pl-5" : "mb-5"}>{renderSegments(text, b, ranges)}</p>
-              )}
-            </div>
-          )}
-        </Fragment>
-      ))}
+      {sections.map((sec, si) => {
+        const useAi = !!sec.ai && !showOriginal.has(sec.page!);
+        const blank = !useAi && sec.original.length === 0;
+        return (
+          <Fragment key={sec.page ?? "all"}>
+            {sec.page !== undefined && (
+              <div
+                data-page-sep={sec.page}
+                data-pg={sec.page}
+                className={`flex select-none flex-wrap items-center gap-x-3 gap-y-1 font-sans text-[11px] tracking-wide text-muted ${si === 0 ? "mb-4" : "mb-4 mt-9"}`}
+              >
+                <span aria-hidden className="h-px min-w-6 flex-1 bg-line" />
+                <span>{pageName(sec.page)}</span>
+                {sec.ai && (
+                  <span className="inline-flex items-center gap-1">
+                    <button
+                      type="button"
+                      aria-pressed={useAi}
+                      onClick={() => onToggle(sec.page!)}
+                      className="border border-line px-2 py-0.5 text-[11px] text-ink hover:border-accent"
+                    >
+                      {useAi ? "Show original text" : "Show AI reading"}
+                    </button>
+                  </span>
+                )}
+                {canRead && <ReadPageButton exists={!!sec.ai} busy={reading} onRead={() => onReadPage(sec.page!)} />}
+                <span aria-hidden className="h-px min-w-6 flex-1 bg-line" />
+              </div>
+            )}
+            {useAi && sec.page !== undefined && (
+              <p data-pg={sec.page} className="mb-3 select-none font-sans text-[11px] text-muted">
+                Read by AI. Check against the page.
+              </p>
+            )}
+            {blank && sec.page !== undefined && (
+              <p data-pg={sec.page} className="mb-5 font-sans text-xs italic text-muted">
+                {canRead ? "No text on this page yet." : "No text on this page."}
+              </p>
+            )}
+            {useAi
+              ? sec.ai!.map((b) => <AiBlock key={b.start} text={text} block={b} ranges={ranges} page={sec.page!} />)
+              : sec.original.map((b) =>
+                  b.kind === "figure" ? (
+                    <FigureBlock key={b.start} text={text} block={b} ranges={ranges} onReflow={onReflow} page={sec.page} />
+                  ) : (
+                    <div key={b.start} className="relative" data-p={b.start} data-p-end={b.end} data-pg={sec.page}>
+                      {b.kind === "heading" ? (
+                        <h3 className="mb-3 mt-6 font-display text-xl leading-snug text-ink">{renderSegments(text, b, ranges)}</h3>
+                      ) : b.kind === "running" ? (
+                        <p className="mb-2 font-sans text-xs text-muted">{renderSegments(text, b, ranges)}</p>
+                      ) : (
+                        <p className={b.kind === "item" ? "mb-3 pl-5" : "mb-5"}>{renderSegments(text, b, ranges)}</p>
+                      )}
+                    </div>
+                  ),
+                )}
+          </Fragment>
+        );
+      })}
     </article>
   );
 });
 
+/** One Markdown chunk of an AI reading, rendered with maths and tables. It has no per-character offsets, so
+ *  highlights tint the whole block; selecting inside it anchors to the block (see handleMouseUp). */
+const AiBlock = memo(function AiBlock({ text, block, ranges, page }: { text: string; block: Block; ranges: Range[]; page: number }) {
+  const hit = ranges.filter((r) => r.start < block.end && r.end > block.start);
+  const cls = [...new Set(hit.map((r) => r.cls))].join(" ");
+  const body = useMemo(() => text.slice(block.start, block.end), [text, block.start, block.end]);
+  return (
+    <div
+      data-ai=""
+      data-p={block.start}
+      data-p-end={block.end}
+      data-pg={page}
+      data-hl-focus={hit.some((r) => r.cls === "hl-focus") ? "" : undefined}
+      className={`relative mb-1 ${cls}`}
+    >
+      <AnswerBody body={body} citations={NO_CITES} onCite={NOOP} variant="chat" />
+    </div>
+  );
+});
+
+function ReadPageButton({ exists, busy, onRead }: { exists: boolean; busy: boolean; onRead: () => void }) {
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={onRead}
+      title="Sends this page to Gemini as an image to read its equations, tables and figures. Uses AI quota."
+      className="border border-line px-2 py-0.5 text-[11px] text-ink hover:border-accent disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {exists ? "Read this page again with AI" : "Read this page with AI"}
+    </button>
+  );
+}
+
+/** The scanned-PDF note and the "Read pages with AI" range control, plus progress and Try again for a run. */
+function PageReadPanel({
+  detail,
+  hasPdf,
+  status,
+  error,
+  onRead,
+  onRetry,
+}: {
+  detail: SourceDetail;
+  hasPdf: boolean;
+  status: PageReadStatus | null;
+  error: string | null;
+  onRead: (from: number, to: number) => void;
+  onRetry: () => void;
+}) {
+  const n = detail.pages.length;
+  const [from, setFrom] = useState("1");
+  const [to, setTo] = useState(String(Math.min(n, 30)));
+  const running = status?.state === "running";
+  const clamp = (v: string) => Math.min(Math.max(1, Math.round(Number(v)) || 1), Math.max(1, n));
+  const scanned = !!detail.no_text_layer;
+  if (!scanned && !status && !error) return null;
+  return (
+    <div className="mt-3 space-y-2 border border-line bg-card px-3 py-2.5 text-sm" aria-label="Read pages with AI">
+      {scanned && (
+        <p className="text-muted">
+          This PDF has no text layer. Read pages with AI to use them.
+          {!hasPdf && " Attach the original file in Page view first."}
+        </p>
+      )}
+      {scanned && hasPdf && n > 0 && (
+        <form
+          className="flex flex-wrap items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            let a = clamp(from);
+            let b = clamp(to);
+            if (a > b) [a, b] = [b, a];
+            b = Math.min(b, a + 29);
+            setFrom(String(a));
+            setTo(String(b));
+            onRead(a, b);
+          }}
+        >
+          <label className="flex items-center gap-1.5 text-muted">
+            Pages
+            <input value={from} onChange={(e) => setFrom(e.target.value)} inputMode="numeric" className="field w-16" aria-label="First page" />
+          </label>
+          <label className="flex items-center gap-1.5 text-muted">
+            to
+            <input value={to} onChange={(e) => setTo(e.target.value)} inputMode="numeric" className="field w-16" aria-label="Last page" />
+          </label>
+          <button
+            type="submit"
+            disabled={running}
+            className="bg-accent px-3 py-1.5 text-sm font-medium text-on-accent hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Read pages with AI
+          </button>
+          <span className="text-xs text-muted">Up to 30 pages per run, one AI call each.</span>
+        </form>
+      )}
+      {running && status && (
+        <div role="status" className="space-y-1">
+          <p className="animate-pulse text-muted">{status.stage}</p>
+          <div className="h-1 bg-sunken" aria-hidden>
+            <div className="h-1 bg-accent transition-[width]" style={{ width: `${Math.round((status.done / Math.max(1, status.total)) * 100)}%` }} />
+          </div>
+        </div>
+      )}
+      {status?.state === "failed" && (
+        <p className="flex flex-wrap items-center gap-2 text-danger" role="alert">
+          {status.error ?? "Reading stopped."}
+          {status.pending.length > 0 && (
+            <button type="button" onClick={onRetry} className="border border-danger px-2 py-0.5 text-xs hover:bg-danger-soft">
+              Try again
+            </button>
+          )}
+        </p>
+      )}
+      {status?.state === "done" && status.total > 0 && <p className="text-muted">Read {status.done} {status.done === 1 ? "page" : "pages"} with AI.</p>}
+      {error && <p className="text-danger">{error}</p>}
+    </div>
+  );
+}
+
 /** Axis labels and other scraps from a figure: folded away until asked for. */
-function FigureBlock({ text, block, ranges, onReflow }: { text: string; block: Block; ranges: Range[]; onReflow: () => void }) {
+function FigureBlock({ text, block, ranges, onReflow, page }: { text: string; block: Block; ranges: Range[]; onReflow: () => void; page?: number }) {
   const hit = ranges.some((r) => r.start < block.end && r.end > block.start);
   const [open, setOpen] = useState(false);
   const first = useRef(true);
@@ -431,7 +734,7 @@ function FigureBlock({ text, block, ranges, onReflow }: { text: string; block: B
     else onReflow(); // margin cards re-place themselves after the layout changed
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
-    <div className="mb-5" data-p={block.start} data-p-end={block.end}>
+    <div className="mb-5" data-p={block.start} data-p-end={block.end} data-pg={page}>
       <button
         type="button"
         aria-expanded={open}

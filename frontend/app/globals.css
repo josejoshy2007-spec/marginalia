@@ -111,6 +111,12 @@ body {
   background: var(--hl-anchor-active);
   border-radius: 2px;
 }
+.hl-chunk {
+  /* the cited chunk, outlined faintly around the sentence that .hl-focus flashes */
+  background: var(--hl-anchor);
+  background: color-mix(in srgb, var(--hl-anchor) 55%, transparent);
+  border-radius: 2px;
+}
 .hl-focus {
   background: var(--hl-focus);
   border-radius: 2px;

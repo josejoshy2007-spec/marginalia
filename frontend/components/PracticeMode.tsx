@@ -22,6 +22,7 @@ import { ExamRunner, Exams } from "./ExamPractice";
 import QuizRunner, { DIFFICULTY_LABEL, QTYPES, similarRequest, typeLabel, type QType } from "./QuizRunner";
 import { MathText } from "./AnswerBody";
 import { askConfirm } from "@/lib/confirm";
+import { useNavSub } from "@/lib/nav";
 
 type Tab = "cards" | "quiz" | "exam";
 type Open = { kind: "review" | "browse" | "quiz" | "exam"; id: number } | null;
@@ -29,6 +30,10 @@ type Open = { kind: "review" | "browse" | "quiz" | "exam"; id: number } | null;
 export default function PracticeMode(p: StudyProps) {
   const [tab, setTab] = useState<Tab>("cards");
   const [open, setOpen] = useState<Open>(null);
+  useNavSub("practice.tab", tab, setTab);
+  useNavSub("practice.open", open, setOpen, (o) =>
+    o ? api.artifacts(p.subjectId, o.kind === "quiz" || o.kind === "exam" ? o.kind : "deck").then((l) => l.some((a) => a.id === o.id)) : Promise.resolve(true),
+  );
 
   if (open?.kind === "review") return <ReviewSession {...p} deckId={open.id} onExit={() => setOpen(null)} />;
   if (open?.kind === "browse") return <BrowseDeck {...p} deckId={open.id} onExit={() => setOpen(null)} />;
@@ -318,30 +323,141 @@ function ReviewSession(p: StudyProps & { deckId: number; onExit: () => void }) {
 
 function BrowseDeck(p: StudyProps & { deckId: number; onExit: () => void }) {
   const [deck, setDeck] = useState<ArtifactDetail | null>(null);
+  const [editing, setEditing] = useState<number | "new" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const reload = useCallback(() => api.artifact(p.deckId).then(setDeck), [p.deckId]);
   useEffect(() => {
-    api.artifact(p.deckId).then(setDeck);
-  }, [p.deckId]);
+    void reload();
+  }, [reload]);
+
+  const save = async (id: number | "new", front: string, back: string) => {
+    setError(null);
+    try {
+      if (id === "new") await api.addCard(p.deckId, { front, back });
+      else await api.updateCard(id, { front, back });
+      setEditing(null);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save the card.");
+    }
+  };
+  const remove = async (c: CardItem) => {
+    const ok = await askConfirm("Delete this card?", { detail: "This can't be undone.", confirmLabel: "Delete" });
+    if (!ok) return;
+    try {
+      await api.deleteCard(c.id);
+      if (editing === c.id) setEditing(null);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not delete the card.");
+    }
+  };
+
   return (
-    <div className="mx-auto max-w-3xl px-6 pt-8">
+    <div className="mx-auto max-w-3xl px-4 pt-8 sm:px-6">
       <button type="button" onClick={p.onExit} className="btn-ghost">
         ← Decks
       </button>
-      <h1 className="mt-4 font-display text-3xl">{deck?.title ?? "…"}</h1>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <h1 className="min-w-0 flex-1 font-display text-3xl">{deck?.title ?? "…"}</h1>
+        {deck && editing !== "new" && (
+          <button type="button" className="btn-primary" onClick={() => setEditing("new")}>
+            Add card
+          </button>
+        )}
+      </div>
+      {error && <p className="mt-3 text-sm text-danger">{error}</p>}
+      {editing === "new" && (
+        <div className="mt-4 rounded border border-line bg-card p-4">
+          <CardForm submitLabel="Add card" onSave={(f, b) => save("new", f, b)} onCancel={() => setEditing(null)} />
+        </div>
+      )}
       <ol className="mt-6 divide-y divide-line border-y border-line">
-        {deck?.cards?.map((c, i) => (
-          <li key={c.id} className="grid gap-1 py-4 sm:grid-cols-[2rem_1fr_1fr] sm:gap-4">
-            <span className="text-sm text-muted">{i + 1}</span>
-            <p className="font-medium"><MathText text={c.front} /></p>
-            <p className="font-reading text-ink-soft">
-              <MathText text={c.back} /> <CiteMarks cite={c.cite} passages={deck.passages} onCite={p.onCite} />
-              <span className="mt-1 block font-sans text-xs text-muted">
-                {c.is_new ? "new" : `next ${timeUntil(c.due_at)}`}
-                {c.lapses ? ` · forgotten ${c.lapses}×` : ""}
-              </span>
-            </p>
-          </li>
-        ))}
+        {deck?.cards?.map((c, i) =>
+          editing === c.id ? (
+            <li key={c.id} className="py-4">
+              <CardForm initial={c} submitLabel="Save" onSave={(f, b) => save(c.id, f, b)} onCancel={() => setEditing(null)} />
+            </li>
+          ) : (
+            <li key={c.id} className="grid gap-1 py-4 sm:grid-cols-[2rem_1fr_1fr] sm:gap-4">
+              <span className="text-sm text-muted">{i + 1}</span>
+              <p className="min-w-0 break-words font-medium"><MathText text={c.front} /></p>
+              <div className="min-w-0 break-words font-reading text-ink-soft">
+                <MathText text={c.back} /> <CiteMarks cite={c.cite ?? []} passages={deck.passages} onCite={p.onCite} />
+                <span className="mt-1 block font-sans text-xs text-muted">
+                  {c.is_new ? "new" : `next ${timeUntil(c.due_at)}`}
+                  {c.lapses ? ` · forgotten ${c.lapses}×` : ""}
+                </span>
+                <span className="mt-2 flex gap-4 font-sans text-xs">
+                  <button type="button" className="text-muted underline-offset-2 hover:text-ink hover:underline" onClick={() => setEditing(c.id)}>
+                    Edit
+                  </button>
+                  <button type="button" className="text-muted underline-offset-2 hover:text-danger hover:underline" onClick={() => void remove(c)}>
+                    Delete
+                  </button>
+                </span>
+              </div>
+            </li>
+          ),
+        )}
       </ol>
+      {deck && !deck.cards?.length && <p className="mt-4 text-muted">No cards yet.</p>}
+    </div>
+  );
+}
+
+function CardForm({
+  initial,
+  submitLabel,
+  onSave,
+  onCancel,
+}: {
+  initial?: { front: string; back: string };
+  submitLabel: string;
+  onSave: (front: string, back: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [front, setFront] = useState(initial?.front ?? "");
+  const [back, setBack] = useState(initial?.back ?? "");
+  const [saving, setSaving] = useState(false);
+  const valid = !!front.trim() && !!back.trim();
+  const submit = async () => {
+    if (!valid || saving) return;
+    setSaving(true);
+    try {
+      await onSave(front, back);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      onCancel();
+    } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      void submit();
+    }
+  };
+  return (
+    <div className="grid gap-3" onKeyDown={onKey}>
+      <label className="grid gap-1 text-xs text-muted">
+        Front
+        <textarea autoFocus rows={2} value={front} onChange={(e) => setFront(e.target.value)} className="field text-base text-ink" />
+      </label>
+      <label className="grid gap-1 text-xs text-muted">
+        Back
+        <textarea rows={3} value={back} onChange={(e) => setBack(e.target.value)} className="field text-base text-ink" />
+      </label>
+      <p className="text-xs text-muted">Write maths between dollar signs, like $x^2$. Ctrl/Cmd+Enter saves, Esc cancels.</p>
+      <div className="flex gap-2">
+        <button type="button" className="btn-primary" disabled={!valid || saving} onClick={() => void submit()}>
+          {submitLabel}
+        </button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }

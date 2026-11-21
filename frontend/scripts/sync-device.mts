@@ -63,6 +63,34 @@ const commands: Record<string, (a: any) => Promise<unknown>> = {
     }));
     return id;
   },
+  /** A ready 3-page PDF source with a text layer and 3 indexed chunks, one per page. */
+  async pdfSource({ subject, title }) {
+    const sid = await subjectId(subject);
+    const parts = ["Atoms have a nucleus.", "Electrons orbit the nucleus.", "Ions carry a charge."];
+    let text = "";
+    const pages = parts.map((p, i) => {
+      if (i) text += "\n\n";
+      const start = text.length;
+      text += p;
+      return { page: i + 1, start, end: text.length };
+    });
+    const id = await db.sources.add({
+      subject_id: sid, kind: "pdf", title, url: null, text, pages, checked: true, status: "ready", error: null, created_at: new Date().toISOString(),
+    });
+    await db.chunks.bulkAdd(parts.map((p, ord) => ({
+      source_id: id, subject_id: sid, ord, text: p, char_start: pages[ord].start, char_end: pages[ord].end, page_start: ord + 1, page_end: ord + 1, token_count: 4, embedding: vec(),
+    })));
+    return id;
+  },
+  /** "Read this page with AI" finished for a page: append the reading (as the app's job does). */
+  async aiRead({ title, page, text }) {
+    const src = (await db.sources.toArray()).find((s) => s.title === title)!;
+    await localApi._pageRead.store(src.id!, page, text);
+  },
+  async setChecked({ title, checked }) {
+    const src = (await db.sources.toArray()).find((s) => s.title === title)!;
+    await localApi.patchSource(src.id!, { checked });
+  },
   /** A ready deck citing chunk 2 of the source, with two cards and a quiz attempt. */
   async deck({ subject, source, title }) {
     const sid = await subjectId(subject);
@@ -83,6 +111,20 @@ const commands: Record<string, (a: any) => Promise<unknown>> = {
     const d = (await db.artifacts.toArray()).find((a) => a.title === deck)!;
     const card = (await db.cards.where("deck_id").equals(d.id!).toArray()).find((c) => c.front === front)!;
     await localApi.gradeCard(card.id!, grade);
+  },
+  async addCard({ deck, front, back }) {
+    const d = (await db.artifacts.toArray()).find((a) => a.title === deck)!;
+    await localApi.addCard(d.id!, { front, back });
+  },
+  async editCard({ deck, front, back }) {
+    const d = (await db.artifacts.toArray()).find((a) => a.title === deck)!;
+    const card = (await db.cards.where("deck_id").equals(d.id!).toArray()).find((c) => c.front === front.from)!;
+    await localApi.updateCard(card.id!, { front: front.to, back });
+  },
+  async deleteCard({ deck, front }) {
+    const d = (await db.artifacts.toArray()).find((a) => a.title === deck)!;
+    const card = (await db.cards.where("deck_id").equals(d.id!).toArray()).find((c) => c.front === front)!;
+    await localApi.deleteCard(card.id!);
   },
   async deleteDeck({ title }) {
     await localApi.deleteArtifact((await db.artifacts.toArray()).find((a) => a.title === title)!.id!);
@@ -126,7 +168,22 @@ const commands: Record<string, (a: any) => Promise<unknown>> = {
       const srcs = sources.filter((x) => x.subject_id === s.id).sort((x, y) => x.title.localeCompare(y.title));
       const arts = artifacts.filter((x) => x.subject_id === s.id);
       out[s.name] = {
-        sources: await Promise.all(srcs.map(async (x) => ({ title: x.title, status: x.status, chunks: await db.chunks.where("source_id").equals(x.id!).count(), textOk: x.text.length > 0 }))),
+        sources: await Promise.all(srcs.map(async (x) => {
+          const chunks = await db.chunks.where("source_id").equals(x.id!).toArray();
+          return {
+            title: x.title, status: x.status, chunks: chunks.length, textOk: x.text.length > 0,
+            // PDFs: AI readings, content revision and the chunk invariant, which must hold on every device.
+            ...(x.kind === "pdf"
+              ? {
+                  rev: x.content_rev ?? 0, checked: x.checked,
+                  ai: (x.ai_pages ?? []).map((a) => `${a.page}:${x.text.slice(a.start, a.end)}`).sort(),
+                  ordsUnique: new Set(chunks.map((c) => c.ord)).size === chunks.length,
+                  invariantOk: chunks.every((c) => x.text.slice(c.char_start, c.char_end) === c.text),
+                  readingChunks: chunks.filter((c) => c.char_start >= x.pages[x.pages.length - 1].end).map((c) => `${c.page_start}:${c.text}`).sort(),
+                }
+              : {}),
+          };
+        })),
         decks: await Promise.all(arts.map(async (a) => {
           const p = a.passages[0];
           const chunk = p ? await db.chunks.get(p.chunk_id) : undefined;

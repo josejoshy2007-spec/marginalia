@@ -4,8 +4,10 @@ import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 
 import { api, ENGINE, KIND_LABEL, pageLabel, type Citation, type Source, type Subject } from "@/lib/api";
 import { FileIcon, LinkIcon, MicIcon, NoteIcon, PlusIcon, TrashIcon } from "./icons";
 import SheetsPanel from "./SheetsPanel";
+import { useNavSub } from "@/lib/nav";
 import { ErrorNote, Segmented } from "./study/shared";
 import { askConfirm } from "@/lib/confirm";
+import { usePasteImages } from "@/lib/photos";
 
 type Props = {
   subjects: Subject[] | null;
@@ -33,6 +35,7 @@ const SHELF_SECTIONS: { title: string; blurb: string; Icon: typeof FileIcon; kin
 
 export default function LibraryMode(p: Props) {
   const [view, setView] = useState<"shelf" | "sheets">("shelf");
+  useNavSub("library.view", view, setView);
   if (p.subjects === null) return <div className="p-10 text-muted">Loading…</div>;
   if (!p.subject)
     return (
@@ -221,6 +224,7 @@ function AddSource({ subjectId, onAdded }: { subjectId: number; onAdded: () => P
   const [url, setUrl] = useState("");
   const [drag, setDrag] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const boxRef = useRef<HTMLElement>(null);
 
   const lastRun = useRef<{ label: string; fn: () => Promise<unknown> } | null>(null);
   const run = async (label: string, fn: () => Promise<unknown>) => {
@@ -248,6 +252,9 @@ function AddSource({ subjectId, onAdded }: { subjectId: number; onAdded: () => P
     }
   };
 
+  // Paste a screenshot anywhere in the box: it becomes an image source (same path as a picked file).
+  usePasteImages(boxRef, (files) => void uploadFiles(files), ENGINE === "local" && !busy);
+
   const tabs: { id: Tab; label: string; Icon: typeof FileIcon }[] = [
     { id: "pdf", label: "File", Icon: FileIcon },
     { id: "text", label: "Paste text", Icon: NoteIcon },
@@ -256,7 +263,7 @@ function AddSource({ subjectId, onAdded }: { subjectId: number; onAdded: () => P
   ];
 
   return (
-    <section className="mt-8 rounded-2xl border border-line bg-card p-5 shadow-[0_1px_0_var(--color-line)]">
+    <section ref={boxRef} className="mt-8 rounded-2xl border border-line bg-card p-5 shadow-[0_1px_0_var(--color-line)]">
       <div className="flex flex-wrap items-center gap-2">
         <span className="mr-2 font-display text-xl">Add a source</span>
         {tabs.map(({ id, label, Icon }) => (
@@ -300,6 +307,7 @@ function AddSource({ subjectId, onAdded }: { subjectId: number; onAdded: () => P
                 ? "PDF, PowerPoint, Word, Excel or CSV, EPUB, text files, or photos of notes. Pages and slide numbers are kept for citations."
                 : "PDF textbooks up to 600 MB. Other file types work in the phone and web app."}
             </p>
+            {ENGINE === "local" && <p className="mt-1 text-xs text-muted">or paste a screenshot (Ctrl+V)</p>}
             <input
               ref={fileRef}
               type="file"

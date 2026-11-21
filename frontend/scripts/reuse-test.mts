@@ -11,12 +11,14 @@ import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 
 let calls = 0;
+let lastBody = "";
 let streamMode: "normal" | "nofinish" | "empty" = "normal";
 const sse = (text: string) =>
   `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: streamMode === "empty" ? "  " : text }] }, ...(streamMode === "nofinish" ? {} : { finishReason: "STOP" }) }] })}
 
 `;
-globalThis.fetch = (async (input: string | URL) => {
+globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+  lastBody = String(init?.body ?? "");
   const url = String(input);
   if (!url.includes("generativelanguage")) throw new Error("unexpected fetch " + url);
   calls++;
@@ -104,6 +106,83 @@ assert.equal(calls, 4);
 await ask(subject.id, { message: "What is mitosis?", source_ids: [a.id] });
 assert.equal(calls, 4, "original still cached");
 ok("different source set, follow-up turn and general mode call Gemini; original stays cached");
+
+// 2b. Photo questions: image sent inline, never cached, thread keeps only the thumbnail.
+{
+  const callsBefore = calls; // later checks count requests from here, so this block restores the counter
+  const full = new Blob([new Uint8Array(5000).fill(7)], { type: "image/jpeg" });
+  const [img] = await (localApi as any).saveAskImages([full]).catch(() => null) ?? [];
+  // makeThumb needs a canvas (browser only); in Node it degrades to "" and the blob is still stored.
+  assert.ok(img?.id, "photo saved");
+  assert.equal(await db.blobs.get(`askimg-${img.id}`).then((r) => r?.blob.size), 5000);
+  const n = calls;
+  const q = { message: "What is shown here?", source_ids: [a.id], images: [img.id] };
+  const e1 = await ask(subject.id, q);
+  assert.equal(calls, n + 1);
+  assert.equal(e1.at(-1).type, "done");
+  const sent = JSON.parse(lastBody);
+  const parts = sent.contents.at(-1).parts;
+  assert.equal(parts[0].inlineData.mimeType, "image/jpeg");
+  assert.ok(parts.at(-1).text.includes("What is shown here?"));
+  assert.match(sent.systemInstruction.parts[0].text, /attach photos/);
+  await ask(subject.id, q);
+  assert.equal(calls, n + 2, "a question with a photo is never replayed from the cache");
+  assert.equal(await db.settings.where("key").startsWith("answer-").count(), 3, "and never saved");
+  // No photo: the note is absent.
+  await ask(subject.id, { message: "Second plain question", source_ids: [a.id], history: [{ role: "user", content: "hi" }, { role: "assistant", content: "hello" }] });
+  assert.doesNotMatch(JSON.parse(lastBody).systemInstruction.parts[0].text, /attach photos/);
+  // A missing blob is reported, not silently dropped.
+  const bad = await ask(subject.id, { ...q, images: ["gone"] });
+  assert.equal(bad.at(-1).type, "error");
+  // The saved conversation carries thumbnails only (no full image) and round-trips.
+  const thread: any = {
+    id: "t-photo", kind: "ask", mode: "sources", busy: false,
+    turns: [{ role: "user", text: "q", images: [{ id: img.id, thumb: "data:image/jpeg;base64,AAAA" }] }, { role: "assistant", body: "a", citations: [] }],
+  };
+  await localApi.saveThread(subject.id, thread);
+  const back = (await localApi.threads(subject.id)).find((t) => t.id === "t-photo")!;
+  assert.deepEqual((back.turns[0] as any).images, [{ id: img.id, thumb: "data:image/jpeg;base64,AAAA" }]);
+  assert.ok(JSON.stringify(back).length < 2000, "thread row stays small");
+  await localApi.deleteThread("t-photo");
+  assert.equal(await db.blobs.get(`askimg-${img.id}`), undefined, "deleting the conversation removes the full image");
+  calls = callsBefore;
+  ok("photo question: inline image + prompt note, never cached, thumbnail-only thread, blob removed with it");
+}
+
+// 2c. Earlier photos ride along on follow-ups (most recent 4 overall); never cached; missing history blobs are skipped.
+{
+  const callsBefore = calls;
+  const save = async (n: number) => (await (localApi as any).saveAskImages([new Blob([new Uint8Array(100 + n).fill(n)], { type: "image/jpeg" })]))[0].id as string;
+  const ids: string[] = [];
+  for (let i = 0; i < 6; i++) ids.push(await save(i));
+  const histOf = (imgs: string[][]) => imgs.flatMap((im, i) => [{ role: "user" as const, content: `q${i}`, ...(im.length ? { images: im } : {}) }, { role: "assistant" as const, content: `a${i}` }]);
+  const n = calls;
+  const keys0 = await db.settings.where("key").startsWith("answer-").count();
+  const e1 = await ask(subject.id, { message: "What about part (b) of the photo?", source_ids: [a.id], history: histOf([[ids[0]]]) });
+  assert.equal(e1.at(-1).type, "done");
+  const c1 = JSON.parse(lastBody).contents;
+  assert.equal(c1.length, 3);
+  assert.equal(c1[0].parts[0].inlineData.mimeType, "image/jpeg", "earlier user turn carries its photo");
+  assert.equal(c1[0].parts.at(-1).text, "q0");
+  assert.equal(c1[2].parts.some((p: any) => p.inlineData), false, "no photo on this turn");
+  assert.match(JSON.parse(lastBody).systemInstruction.parts[0].text, /attach photos/);
+  // Cap: 5 earlier photos plus 1 now -> only the most recent 4 in total.
+  const e2 = await ask(subject.id, { message: "compare", source_ids: [a.id], images: [ids[5]], history: histOf([[ids[0], ids[1]], [ids[2], ids[3]], [ids[4]]]) });
+  assert.equal(e2.at(-1).type, "done");
+  const c2 = JSON.parse(lastBody).contents;
+  const count = c2.flatMap((c: any) => c.parts).filter((p: any) => p.inlineData).length;
+  assert.equal(count, 4, "at most 4 images across the conversation");
+  assert.equal(c2.at(-1).parts.filter((p: any) => p.inlineData).length, 1, "the current photo is always kept");
+  assert.equal(c2[0].parts.some((p: any) => p.inlineData), false, "oldest photos are dropped first");
+  // A missing history blob is skipped silently; the turn still succeeds.
+  const e3 = await ask(subject.id, { message: "and now?", source_ids: [a.id], history: histOf([["gone"]]) });
+  assert.equal(e3.at(-1).type, "done");
+  assert.equal(JSON.parse(lastBody).contents[0].parts.some((p: any) => p.inlineData), false);
+  assert.equal(calls, n + 3);
+  assert.equal(await db.settings.where("key").startsWith("answer-").count(), keys0, "nothing cached when images are involved");
+  calls = callsBefore;
+  ok("history photos: sent as inlineData on follow-ups, capped at 4, missing blobs skipped, never cached");
+}
 
 // Re-indexing changes the chunk count, so the key changes.
 assert.equal(await db.settings.where("key").startsWith("answer-").count(), 3);

@@ -215,3 +215,65 @@ export function pageAt(pages: PageLike[], offset: number): number | null {
 export function shouldHandleFocus(nonce: number, handled: number): boolean {
   return nonce !== handled;
 }
+
+/** One page of a PDF as Read mode's text view shows it. */
+export type PageSection = {
+  /** Undefined for sources without pages (one section holds everything). */
+  page?: number;
+  /** The extracted text's display blocks for this page (empty for a page with no text layer). */
+  original: Block[];
+  /** The AI reading's blocks (blank-line separated Markdown chunks), or null if the page has none. */
+  ai: Block[] | null;
+};
+
+/**
+ * Split the text into per-page sections. AI page readings were appended after the extracted text
+ * (`aiPages` spans), so the extracted part is a prefix of `text` and its blocks keep their absolute
+ * offsets; an AI reading's blocks are shifted by the span start. Nothing is re-normalised.
+ */
+export function buildSections(text: string, pagesIn: PageLike[], aiPages: PageLike[] = []): PageSection[] {
+  const pages = [...pagesIn].sort((a, b) => a.start - b.start);
+  if (!pages.length) return [{ original: buildBlocks(text, []), ai: null }];
+  const ai = new Map(aiPages.map((a) => [a.page, a]));
+  const origEnd = ai.size ? pages.reduce((m, p) => Math.max(m, p.end ?? p.start), 0) : text.length;
+  const blocks = buildBlocks(origEnd < text.length ? text.slice(0, origEnd) : text, pages);
+  const sections: PageSection[] = pages.map((p) => ({ page: p.page, original: [], ai: null }));
+  let pi = 0;
+  for (const b of blocks) {
+    while (pi + 1 < pages.length && pages[pi + 1].start <= b.start) pi++;
+    sections[pi].original.push(b);
+  }
+  sections.forEach((sec, i) => {
+    const a = ai.get(pages[i].page);
+    if (a) sec.ai = markdownBlocks(text, a.start, a.end ?? text.length);
+  });
+  return sections;
+}
+
+/** Blank-line separated chunks of text[start, end) with absolute offsets (an AI reading is Markdown, rendered chunk by chunk). */
+export function markdownBlocks(text: string, start: number, end: number): Block[] {
+  const out: Block[] = [];
+  const re = /\n{2,}/g;
+  const body = text.slice(start, end);
+  const push = (a: number, b: number) => {
+    let s = start + a;
+    let e = start + b;
+    while (s < e && /\s/.test(text[s])) s++;
+    while (e > s && /\s/.test(text[e - 1])) e--;
+    if (e > s) out.push({ kind: "para", start: s, end: e });
+  };
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(body))) {
+    push(last, m.index);
+    last = m.index + m[0].length;
+  }
+  push(last, body.length);
+  return out;
+}
+
+/** The page a text offset belongs to: an AI reading's page if it lies in one, else the extracted page. */
+export function pageOfOffset(pages: PageLike[], aiPages: PageLike[] | undefined, offset: number): number | null {
+  for (const a of aiPages ?? []) if (a.end !== undefined && offset >= a.start && offset < a.end) return a.page;
+  return pageAt(pages, offset);
+}

@@ -7,6 +7,8 @@
  * Gemini request bodies are translated here, so callers keep building one Gemini-shaped body.
  * Errors are plain Errors: the router in gemini.ts treats any failure here as "try the next model".
  */
+import { cerebrasTokens, recordTokens, type UsageMeta } from "./usage";
+
 export const CEREBRAS_BASE = "https://api.cerebras.ai/v1";
 
 /** Preferred models, best first; the first one the key can use is saved on "Save key". */
@@ -129,7 +131,7 @@ async function post(key: string, model: string, messages: Msg[], extra: Rec, sig
 }
 
 /** A structured-output call: the schema goes in the prompt, JSON mode on, then fitted to the schema. */
-export async function cerebrasJson<T>(key: string, model: string, body: Rec, schema: Rec, signal?: AbortSignal): Promise<T> {
+export async function cerebrasJson<T>(key: string, model: string, body: Rec, schema: Rec, signal?: AbortSignal, meta?: UsageMeta): Promise<T> {
   const msgs = toMessages(
     body,
     "\n\nReply with a single JSON object and nothing else. It must match this JSON Schema, with every " +
@@ -138,16 +140,19 @@ export async function cerebrasJson<T>(key: string, model: string, body: Rec, sch
   const res = await post(key, model, msgs, { response_format: { type: "json_object" } }, signal);
   const data = await res.json();
   const choice = data.choices?.[0];
+  const ct = cerebrasTokens(data.usage);
+  if (ct && meta) await recordTokens("cerebras", meta.tag, ct, meta.strong);
   if (choice?.finish_reason === "length") throw new Error("Cerebras ran out of output space.");
   return fitSchema(schema, parseJsonReply(String(choice?.message?.content ?? ""))) as T;
 }
 
 /** A streamed chat answer; yields text pieces and finally the finish reason in Gemini's words. */
-export async function* cerebrasStream(res: Response): AsyncGenerator<{ text?: string; finish?: string | null }> {
+export async function* cerebrasStream(res: Response, meta?: UsageMeta): AsyncGenerator<{ text?: string; finish?: string | null }> {
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buf = "";
   let finish: string | null = null;
+  let usage: Rec | undefined;
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -161,12 +166,15 @@ export async function* cerebrasStream(res: Response): AsyncGenerator<{ text?: st
       if (payload === "[DONE]") continue;
       const data = JSON.parse(payload);
       if (data.error) throw new Error(`Cerebras: ${data.error.message ?? "stream error"}`);
+      if (data.usage) usage = data.usage;
       for (const c of data.choices ?? []) {
         if (c.delta?.content) yield { text: c.delta.content };
         if (c.finish_reason) finish = c.finish_reason === "length" ? "MAX_TOKENS" : c.finish_reason === "content_filter" ? "SAFETY" : "STOP";
       }
     }
   }
+  const ct = cerebrasTokens(usage);
+  if (ct && meta) await recordTokens("cerebras", meta.tag, ct, meta.strong);
   yield { finish };
 }
 

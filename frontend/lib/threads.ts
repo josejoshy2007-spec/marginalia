@@ -2,8 +2,12 @@ import type { Citation } from "./api";
 
 export type Anchor = { start: number; end: number; text: string };
 
+/** A photo attached to a question. `thumb` (≤320 px JPEG data URL) is what the conversation keeps and syncs;
+ * the full image lives only in the device's blob store under `askimg-<id>`. */
+export type AskImage = { id: string; thumb: string };
+
 export type Turn =
-  | { role: "user"; text: string }
+  | { role: "user"; text: string; images?: AskImage[] }
   // `body` holds the answer text with ⟦n⟧ tokens marking where citation n (1-based) applies.
   | { role: "assistant"; body: string; citations: Citation[]; error?: string };
 
@@ -28,11 +32,13 @@ export const CITE_TOKEN = /⟦(\d+)⟧/g;
 export const stripCites = (s: string) => s.replace(CITE_TOKEN, "");
 
 /** The thread minus its last question/answer pair, plus that question, for re-asking after an error. */
-export function forRetry(thread: Thread): { trimmed: Thread; question: string } | null {
+export function forRetry(thread: Thread): { trimmed: Thread; question: string; images?: AskImage[] } | null {
   const idx = thread.turns.map((t) => t.role).lastIndexOf("user");
   if (idx < 0) return null;
   const q = thread.turns[idx];
-  return q.role === "user" ? { trimmed: { ...thread, turns: thread.turns.slice(0, idx) }, question: q.text } : null;
+  return q.role === "user"
+    ? { trimmed: { ...thread, turns: thread.turns.slice(0, idx) }, question: q.text, ...(q.images?.length ? { images: q.images } : {}) }
+    : null;
 }
 
 export function newThreadId() {

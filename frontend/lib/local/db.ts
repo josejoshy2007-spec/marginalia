@@ -49,6 +49,19 @@ export interface SourceRow extends Synced {
   status: "ready" | "processing" | "failed";
   error?: string | null;
   created_at: string;
+  /**
+   * "Read this page with AI" results (PDFs): each page's reading is APPENDED to `text` (never edits it), and
+   * this records where, so `text.slice(start, end)` is that page's reading. Pages that were read again
+   * keep only their newest entry; the older text stays in `text` as unreferenced filler.
+   * Not indexed, so no Dexie version bump.
+   */
+  ai_pages?: PageSpan[];
+  /** Bumped by every AI page reading. Sync names a source's content file after it, so other devices notice the change. */
+  content_rev?: number;
+  /** Identifies which content a revision number holds (two devices can reach the same rev with different readings). */
+  content_tag?: string;
+  /** A PDF whose pages had no extractable text (scanned): pages are blank until read with AI. */
+  no_text_layer?: boolean;
 }
 
 export interface ChunkRow {

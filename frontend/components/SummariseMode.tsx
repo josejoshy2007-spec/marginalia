@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useNavSub } from "@/lib/nav";
 import { api, KIND_LABEL, type ArtifactDetail, type ArtifactSummary, type Citation, type Source } from "@/lib/api";
 import { markersToTokens } from "@/lib/cite";
 import AnswerBody from "./AnswerBody";
@@ -22,6 +23,7 @@ const formatLabel = (v: string) => FORMATS.find((f) => f.value === v)?.label ?? 
 export default function SummariseMode(p: StudyProps) {
   const { items, error, setError, remove, refresh, retry } = useArtifacts(p.subjectId, "summary");
   const [openId, setOpenId] = useState<number | null>(null);
+  useNavSub("summarise.open", openId, setOpenId, (id) => api.artifacts(p.subjectId, "summary").then((l) => l.some((a) => a.id === id)));
 
   if (openId != null) return <SummaryView id={openId} onCite={p.onCite} onExit={() => setOpenId(null)} />;
 

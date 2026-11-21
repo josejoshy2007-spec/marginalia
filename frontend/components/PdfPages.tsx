@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { openPdf } from "@/lib/local/parse";
 
 type PdfDoc = Awaited<ReturnType<typeof openPdf>>["doc"];
@@ -15,12 +15,14 @@ type Props = {
   outline: { page: number; nonce: number } | null;
   /** Lets the parent ask which page is at the top of the screen (when switching views). */
   currentPageRef: { current: (() => number) | null };
+  /** Shown beside each page's number (e.g. "Read this page with AI"). */
+  pageAction?: (n: number) => ReactNode;
 };
 
 const scroller = () => document.getElementById("mode-scroll");
 
 /** The real PDF pages, drawn lazily as they scroll into view. */
-export default function PdfPages({ blob, pageCount, initialPage, outline, currentPageRef }: Props) {
+export default function PdfPages({ blob, pageCount, initialPage, outline, currentPageRef, pageAction }: Props) {
   const [doc, setDoc] = useState<PdfDoc | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [ratios, setRatios] = useState<Record<number, number>>({});
@@ -105,6 +107,7 @@ export default function PdfPages({ blob, pageCount, initialPage, outline, curren
             width={width}
             ratio={ratios[n] ?? ratio0}
             lit={lit === n}
+            action={pageAction?.(n)}
             onRatio={(r) => setRatios((all) => (Math.abs((all[n] ?? 0) - r) < 0.001 ? all : { ...all, [n]: r }))}
           />
         ))}
@@ -119,6 +122,7 @@ function PdfPage({
   width,
   ratio,
   lit,
+  action,
   onRatio,
 }: {
   doc: PdfDoc;
@@ -126,6 +130,7 @@ function PdfPage({
   width: number;
   ratio: number;
   lit: boolean;
+  action?: ReactNode;
   onRatio: (r: number) => void;
 }) {
   const wrap = useRef<HTMLDivElement>(null);
@@ -183,7 +188,10 @@ function PdfPage({
       >
         <canvas ref={canvas} className="absolute inset-0 h-full w-full" aria-label={`Page ${n}`} />
       </div>
-      <p className="mt-1 text-center text-[11px] tracking-wide text-muted">p. {n}</p>
+      <p className="mt-1 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] tracking-wide text-muted">
+        <span>p. {n}</span>
+        {action}
+      </p>
     </div>
   );
 }

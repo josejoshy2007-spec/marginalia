@@ -1,0 +1,14 @@
+{
+  "_note": "MADE UP example for the file format. Not from any real IB paper or markscheme.",
+  "course": "Physics",
+  "level": "SL",
+  "question": "Explain why a metal spoon feels colder than a wooden spoon at the same room temperature.",
+  "marks": 3,
+  "markscheme_points": [
+    { "text": "Metal is a better thermal conductor than wood", "marks": 1 },
+    { "text": "So heat flows from the hand to the metal faster", "marks": 1 },
+    { "text": "The skin cools more quickly, which is sensed as colder", "marks": 1 }
+  ],
+  "student_answer": "Metal conducts heat better than wood, so it takes heat away from your hand faster and your skin gets cooler.",
+  "official_mark": 3
+}
