@@ -360,6 +360,8 @@ export async function generateJson<T = Record<string, unknown>>(
     inputTokens?: number;
     /** Gemini 3 thinking level (omit for the model's default). */
     thinking?: Thinking;
+    /** Video/image token cost per frame (low cuts video tokens a lot). */
+    mediaResolution?: "MEDIA_RESOLUTION_LOW" | "MEDIA_RESOLUTION_MEDIUM" | "MEDIA_RESOLUTION_HIGH";
   } = {},
 ): Promise<T> {
   const s = await getSettings();
@@ -367,6 +369,7 @@ export async function generateJson<T = Record<string, unknown>>(
     systemInstruction: { parts: [{ text: system + (opts.ctx ?? "") }] },
     contents: [{ role: "user", parts: [...(opts.parts ?? []), { text: prompt }] }],
     generationConfig: {
+      ...(opts.mediaResolution ? { mediaResolution: opts.mediaResolution } : {}),
       maxOutputTokens: s.maxTokens,
       responseMimeType: "application/json",
       responseSchema: schema,

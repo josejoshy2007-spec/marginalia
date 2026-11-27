@@ -8,8 +8,10 @@ import type { Anchor, Thread } from "@/lib/threads";
 import type { Focus } from "./App";
 import AnswerBody from "./AnswerBody";
 import MarginThread from "./MarginThread";
+import OriginalView, { hasOriginalView } from "./OriginalView";
 import PdfPages from "./PdfPages";
 import { Segmented } from "./study/shared";
+import { timestampAt } from "@/lib/original";
 
 type Props = {
   sources: Source[];
@@ -30,9 +32,15 @@ type Range = { start: number; end: number; cls: string };
 
 const detailCache = new Map<number, SourceDetail>();
 /** Which view each PDF was last read in (kept while the app is open). */
-const viewMemo = new Map<number, "text" | "page">();
+const viewMemo = new Map<number, "text" | "page" | "original">();
 /** Nonce of the last citation click acted on; `focus` in App is never cleared, so re-entering Read mode must not replay it. */
 let handledFocusNonce = 0;
+
+/** Where to seek for a citation: from the narrowed sentence (chunks overlap, so the chunk start can be minutes early). */
+function seekSeconds(text: string, focus: { start: number; end: number; claim?: string | null }): number | null {
+  const n = narrowCitation(text, focus.start, focus.end, focus.claim);
+  return timestampAt(text, n.start);
+}
 
 export default function ReadMode(p: Props) {
   const [detail, setDetail] = useState<SourceDetail | null>(null);
@@ -43,7 +51,9 @@ export default function ReadMode(p: Props) {
   const { source, focus, threads } = p;
 
   // Text (reflowed) or Page (the real PDF page). The reading position carries across by page number.
-  const [view, setView] = useState<"text" | "page">("text");
+  const [view, setView] = useState<"text" | "page" | "original">("text");
+  /** Focus nonce already handled when Original was opened: a seek must be newer, so opening it never replays an old citation. */
+  const originalOpenNonce = useRef(0);
   const [pdf, setPdf] = useState<Blob | null | undefined>(undefined);
   const [attachErr, setAttachErr] = useState<string | null>(null);
   const [outline, setOutline] = useState<{ page: number; nonce: number } | null>(null);
@@ -54,12 +64,21 @@ export default function ReadMode(p: Props) {
   const pendingTextPage = useRef<number | null>(null);
   const sourceId = source?.id;
   useEffect(() => {
-    setView(sourceId != null ? (viewMemo.get(sourceId) ?? "text") : "text");
+    const v = sourceId != null ? (viewMemo.get(sourceId) ?? "text") : "text";
+    if (v === "original") originalOpenNonce.current = handledFocusNonce; // restoring must not replay an old citation's seek
+    setView(v);
     pendingTextPage.current = null;
     startPage.current = 1;
     setOutline(null);
   }, [sourceId]);
   const pageView = PDF_PAGE_VIEW && source?.kind === "pdf" && view === "page";
+  const originalView = PDF_PAGE_VIEW && !!source && source.kind !== "pdf" && hasOriginalView(source) && view === "original";
+  // A cited moment in a recording or video: the stamp that opens the cited text (or its paragraph).
+  const seek = useMemo(() => {
+    if (!focus || !detail || focus.sourceId !== detail.id) return null;
+    const seconds = seekSeconds(detail.text, focus);
+    return seconds == null ? null : { seconds, nonce: focus.nonce };
+  }, [focus, detail]);
   const loadPdf = useCallback(() => {
     if (sourceId == null) return () => {};
     let live = true;
@@ -172,6 +191,21 @@ export default function ReadMode(p: Props) {
     if (!focus || !detail || focus.sourceId !== detail.id) return;
     if (!shouldHandleFocus(focus.nonce, handledFocusNonce)) return;
     handledFocusNonce = focus.nonce;
+    const toText = () => {
+      if (!source) return;
+      viewMemo.set(source.id, "text");
+      setView("text");
+    };
+    // Original can only follow a citation by seeking audio/video; for anything else, or when there is no stamp at
+    // the cited spot, show the cited text.
+    if (view === "original" && source) {
+      const seekable = source.kind === "audio" || source.kind === "video";
+      if (!seekable || seekSeconds(detail.text, focus) == null) toText();
+      else if (source.kind === "audio") {
+        // A recording with no kept file on this device has nothing to seek in.
+        api.sourceOriginal(source.id).then((o) => !o && toText()).catch(() => toText());
+      }
+    }
     // Narrow the cited chunk to the sentence the answer's claim rests on (the whole chunk if unsure).
     const n = narrowCitation(detail.text, focus.start, focus.end, focus.claim);
     setFlash({ start: focus.start, end: focus.end, ns: n.start, ne: n.end, narrowed: n.start !== focus.start || n.end !== focus.end, nonce: focus.nonce });
@@ -193,7 +227,7 @@ export default function ReadMode(p: Props) {
     }
     if (flashTimer.current) clearTimeout(flashTimer.current);
     flashTimer.current = setTimeout(() => setFlash(null), 3200);
-  }, [focus, detail]);
+  }, [focus, detail]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!flash) return;
@@ -212,7 +246,7 @@ export default function ReadMode(p: Props) {
     el?.scrollIntoView({ block: "start" });
   }, [view, detail]);
 
-  const switchView = (v: "text" | "page") => {
+  const switchView = (v: "text" | "page" | "original") => {
     if (!source || !detail || v === view) return;
     if (v === "page") {
       // Page of the first block at the top of the screen.
@@ -223,8 +257,9 @@ export default function ReadMode(p: Props) {
         pg = Number(el.dataset.pg);
       }
       startPage.current = pg;
-    } else pendingTextPage.current = pdfPageRef.current?.() ?? startPage.current;
+    } else if (source.kind === "pdf") pendingTextPage.current = pdfPageRef.current?.() ?? startPage.current;
     viewMemo.set(source.id, v);
+    if (v === "original") originalOpenNonce.current = handledFocusNonce;
     setOutline(null);
     setView(v);
   };
@@ -339,6 +374,19 @@ export default function ReadMode(p: Props) {
             />
           </div>
         )}
+        {PDF_PAGE_VIEW && source.kind !== "pdf" && detail && hasOriginalView(source) && (
+          <div className="mt-3">
+            <Segmented
+              label="View"
+              value={view === "original" ? "original" : "text"}
+              onChange={switchView}
+              options={[
+                { value: "text", label: "Text" },
+                { value: "original", label: "Original" },
+              ]}
+            />
+          </div>
+        )}
         {source.kind === "pdf" && detail && (
           <PageReadPanel
             detail={detail}
@@ -350,7 +398,7 @@ export default function ReadMode(p: Props) {
           />
         )}
         <p className="mt-2 text-sm text-muted">
-          {pageView ? "Showing the original pages. Switch to Text to select a passage and ask about it." : "Select any passage to open a thread in the margin."}
+          {pageView ? "Showing the original pages. Switch to Text to select a passage and ask about it." : originalView ? "Showing the original. Switch to Text to select a passage and ask about it." : "Select any passage to open a thread in the margin."}
           {source.url && (
             <>
               {" · "}
@@ -373,7 +421,8 @@ export default function ReadMode(p: Props) {
         !detail && !loadErr && <p className="animate-pulse text-muted">Opening…</p>
       )}
 
-      {detail && !pageView && (
+      {detail && originalView && <OriginalView key={source.id} source={source} seek={seek && seek.nonce > originalOpenNonce.current ? seek : null} />}
+      {detail && !pageView && !originalView && (
         <div ref={docRef} onMouseUp={handleMouseUp} className="relative">
           <DocumentText
             text={detail.text}
@@ -417,7 +466,7 @@ export default function ReadMode(p: Props) {
         />
       )}
       </div>
-      {!pageView && (
+      {!pageView && !originalView && (
         <MarginColumn
           threads={detail ? threads : []}
           docRef={docRef}

@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { CiteMarks, ErrorNote, Segmented, useArtifacts, Working, type StudyProps } from "./study/shared";
 import { MathText } from "./AnswerBody";
+import PracticeTimer from "./PracticeTimer";
 import PhotoButton from "./PhotoButton";
 
 export type QType = "mcq" | "short" | "long";
@@ -180,6 +181,11 @@ export default function QuizRunner(p: StudyProps & { quizId: number; onExit: () 
       <button type="button" onClick={p.onExit} className="btn-ghost min-h-11">
         ← Quizzes
       </button>
+      {!result && (
+        <div className="mt-2 flex justify-end">
+          <PracticeTimer />
+        </div>
+      )}
 
       <header className="mt-3">
         <h1 className="font-display text-2xl leading-tight sm:text-3xl">

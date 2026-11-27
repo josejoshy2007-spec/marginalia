@@ -8,6 +8,8 @@ import { useNavSub } from "@/lib/nav";
 import { ErrorNote, Segmented } from "./study/shared";
 import { askConfirm } from "@/lib/confirm";
 import { usePasteImages } from "@/lib/photos";
+import { needsVideoConfirm, videoCostMessage } from "@/lib/local/youtube";
+import { YOUTUBE_RE } from "@/lib/local/parse";
 
 type Props = {
   subjects: Subject[] | null;
@@ -223,6 +225,8 @@ function AddSource({ subjectId, onAdded }: { subjectId: number; onAdded: () => P
   const [text, setText] = useState("");
   const [url, setUrl] = useState("");
   const [drag, setDrag] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<{ url: string; message: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const boxRef = useRef<HTMLElement>(null);
 
@@ -358,13 +362,38 @@ function AddSource({ subjectId, onAdded }: { subjectId: number; onAdded: () => P
             onSubmit={async (e) => {
               e.preventDefault();
               if (!url.trim()) return;
-              const yt = /youtu\.?be/.test(url);
-              if (await run(yt ? "Transcribing the video with Gemini (can take a minute)…" : "Fetching page…", () => api.addUrl(subjectId, url.trim()))) setUrl("");
+              const clean = url.trim();
+              if (/youtu\.?be/.test(clean)) {
+                setBusy("Checking the video…");
+                setError(null);
+                const link = /^https?:\/\//i.test(clean) ? clean : `https://${clean}`;
+                const info = YOUTUBE_RE.test(link) ? await api.youtubeInfo(link).catch(() => null) : null;
+                setBusy(null);
+                if (info?.hasCaptions) {
+                  setNote("Free: uses the video's captions");
+                  if (await run("Adding the video's captions…", () => api.addUrl(subjectId, clean))) setUrl("");
+                  return;
+                }
+                if (ENGINE === "local" && needsVideoConfirm(info)) {
+                  setConfirm({
+                    url: clean,
+                    message: info ? videoCostMessage(info.minutes) : videoCostMessage(null).replace("No captions found", "Couldn't check this video for captions"),
+                  });
+                  return;
+                }
+                if (await run("Transcribing the video with Gemini (can take a minute)…", () => api.addUrl(subjectId, clean))) setUrl("");
+                return;
+              }
+              if (await run("Fetching page…", () => api.addUrl(subjectId, clean))) setUrl("");
             }}
           >
             <input
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => {
+                setUrl(e.target.value);
+                setNote(null);
+                setConfirm(null);
+              }}
               placeholder="A web page, PDF link, or YouTube video URL"
               className="field min-w-0 flex-1"
               inputMode="url"
@@ -385,6 +414,29 @@ function AddSource({ subjectId, onAdded }: { subjectId: number; onAdded: () => P
           />
         )}
       </div>
+      {tab === "url" && note && !confirm && <p className="mt-3 text-sm text-muted">{note}</p>}
+      {tab === "url" && confirm && (
+        <div className="mt-3 rounded border border-line bg-sunken p-3 text-sm">
+          <p>{confirm.message}</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={!!busy}
+              onClick={async () => {
+                const u = confirm.url;
+                setConfirm(null);
+                if (await run("Transcribing the video with Gemini (can take a minute)…", () => api.addUrl(subjectId, u))) setUrl("");
+              }}
+            >
+              Continue
+            </button>
+            <button type="button" className="rounded border border-line px-3 py-1 text-sm hover:bg-card" onClick={() => setConfirm(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
       {busy && <p className="mt-3 animate-pulse text-sm text-muted">{busy}</p>}
       {error && (
         <ErrorNote

@@ -172,8 +172,11 @@ Free-tier reality: the main model allows ~20 requests/day; the smoke test alone 
 
 ## Known gaps / next steps
 
-- **Ideas from the student (later):**
-  - In exam questions, an option where the AI writes questions modelled on how IB usually phrases and structures questions for that subject (typical command terms, mark splits and question styles from past papers), rather than only from the sources.
+- **Built from the student's ideas (2026-11-24), not yet tried on a device:**
+  - Practice timer (`components/PracticeTimer.tsx`, logic in `lib/timer.ts`, `test:timer`) in exam questions, quizzes and card review. One shared timer kept in `sessionStorage` (`marginalia-practice-timer`), so it survives leaving the screen; custom minutes clamped to 1–600.
+  - YouTube captions first (`lib/local/youtube.ts`, `test:youtube`): parses `captionTracks` from the watch page, manual English > auto English > any, json3/XML → `(mm:ss)` paragraphs, 15 s timeouts. Gemini fallback with `mediaResolution: LOW` and `(mm:ss)` paragraph stamps. Before adding, `youtubeInfo` checks for working captions and the length; with none and over 15 min (or unknown) the Link tab asks to confirm with a token estimate (~100 tokens/s, assumes ~1M free tokens/day). Browsers usually hit CORS, so captions mostly work in the APK only.
+  - Original view in Read mode (`components/OriginalView.tsx`, `lib/original.ts`, `lib/office-view.ts`, `test:original`, `test:office-view`): non-PDF uploads kept as local-only `orig-<id>` blobs (best effort, removed with the source, race-safe). PowerPoint `.pptx` as slide cards with pictures, Excel/CSV as tables (≤500 rows/sheet, ≤200 columns), Word `.docx` as headings/paragraphs/lists/tables/images (React elements only), images (SVG not shown inline), recording player that seeks to the cited `(mm:ss)`, YouTube nocookie embed at the timestamp, http/https page link. Zip limits: 50 MB per entry, 150 MB total. `.odp/.ods/.odt`/EPUB get only "Open original file". A citation into a non-seekable source switches to Text.
+  - Known lows: an audio source's async "no original" check can flip the next source to Text if you switch quickly; a video whose YouTube id can't be parsed shows only a link.
 - Not built yet (equivalents exist in NotebookLM/Turbo): video overviews, slide decks, infographics, web source discovery, collaboration/sharing, editable notes, interactive "join the conversation" audio.
 - Concurrent AI page reads on two devices can leave stale citation offsets on the losing device, and a newer re-read can lose to an older reading.
 - Claude has no retry without `effort`.

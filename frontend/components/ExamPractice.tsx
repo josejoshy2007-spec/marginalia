@@ -7,6 +7,7 @@ import { CiteMarks, ErrorNote, IBBadge, Segmented, scopeLabel, useArtifacts, Wor
 import { isReady, JobStatus } from "./study/shared";
 import { TrashIcon } from "./icons";
 import PhotoButton from "./PhotoButton";
+import PracticeTimer from "./PracticeTimer";
 import { MathText } from "./AnswerBody";
 import { ExamText } from "./ExamText";
 import { askConfirm } from "@/lib/confirm";
@@ -317,7 +318,10 @@ export function ExamRunner(p: StudyProps & { examId: number; onExit: () => void 
           </span>
         )}
       </div>
-      <h1 className="mt-4 font-display text-3xl leading-tight">{exam?.title ?? "…"}</h1>
+      <div className="mt-3 flex justify-end">
+        <PracticeTimer />
+      </div>
+      <h1 className="mt-2 font-display text-3xl leading-tight">{exam?.title ?? "…"}</h1>
       <p className="mt-1 text-sm text-muted">
         {paper
           ? paper.hint

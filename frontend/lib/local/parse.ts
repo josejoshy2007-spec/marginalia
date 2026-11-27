@@ -7,6 +7,7 @@
  */
 import type { PageSpan } from "./db";
 import { GeminiError, generateJson, generateText, patiently, uploadFile } from "./gemini";
+import { fetchCaptions, videoIdOf } from "./youtube";
 
 export type ParsedDoc = { title: string; text: string; pages: PageSpan[]; /** A PDF with no text layer (scanned): pages are blank until read with AI. */ noText?: boolean };
 export class ParseError extends Error {}
@@ -264,12 +265,20 @@ const TRANSCRIPT_SCHEMA = {
   required: ["title", "transcript"],
 };
 
-export async function transcribeYoutube(url: string): Promise<ParsedDoc> {
+export async function transcribeYoutube(url: string, onProgress?: Progress): Promise<ParsedDoc> {
+  // Captions first: free, no AI call. Any failure just falls through to Gemini.
+  const id = videoIdOf(url);
+  const caps = id ? await fetchCaptions(id) : null;
+  if (caps) {
+    onProgress?.(0.5, "Using the video's captions");
+    return parseText(caps.text, caps.title.slice(0, 300));
+  }
   const out = await generateJson<{ title?: string; transcript?: string }>(
     TRANSCRIBE_SYSTEM + " Add short '## Section' headings where the topic clearly shifts.",
-    "Transcribe the spoken content of this video. `title` is the video's topic in a few words.",
+    "Transcribe the spoken content of this video. `title` is the video's topic in a few words. " +
+      "Start each paragraph of the transcript with its start time in brackets, like (12:05).",
     TRANSCRIPT_SCHEMA,
-    { parts: [{ fileData: { fileUri: url } }], tag: "youtube" },
+    { parts: [{ fileData: { fileUri: url } }], tag: "youtube", mediaResolution: "MEDIA_RESOLUTION_LOW" },
   );
   const text = (out.transcript ?? "").trim();
   if (!text) throw new GeminiError("Gemini couldn't hear any speech to transcribe.");

@@ -38,6 +38,7 @@ import {
 import { GeminiError, patiently, speak, streamGenerate } from "./gemini";
 import { embedPassages, resetWorker, whenIdle } from "./embedder";
 import * as ib from "./ib";
+import { youtubeInfo, videoIdOf } from "./youtube";
 import { parseText, parseUrl, parsePdf, openPdf, pdfPageCount, ParseError, transcribeRecording, transcribeYoutube, YOUTUBE_RE } from "./parse";
 import { citation, forgetSource, passageBlock, retrieve, selectPassages, summaryPassages, type Retrieved } from "./search";
 import { EMBED_DIM, getSettings } from "./settings";
@@ -92,6 +93,8 @@ const message = (e: unknown) =>
 const uploadKey = (sourceId: number) => `upload-${sourceId}`;
 /** The original PDF, kept on this device for Read mode's page view (not synced, not in backups). */
 const pdfKey = (sourceId: number) => `pdf-${sourceId}`;
+/** The original of a non-PDF file source (photo, slides, document, recording); local only, never synced. */
+const origKey = (sourceId: number) => `orig-${sourceId}`;
 const audioKey = (episodeId: number) => `episode-${episodeId}`;
 
 let booted: Promise<void> | null = null;
@@ -443,8 +446,18 @@ function submitSource(id: number) {
       await indexSource(src, (f, s) => report(share + f * (1 - share), s));
       if (!(await db.sources.get(id))) return;
       await db.sources.update(id, { status: "ready", error: null });
-      const kept = src.kind === "pdf" ? await db.blobs.get(uploadKey(id)) : undefined;
-      if (kept) await db.blobs.put({ key: pdfKey(id), blob: kept.blob, name: kept.name });
+      try {
+        const kept = src.kind === "pdf" ? await db.blobs.get(uploadKey(id)) : undefined;
+        if (kept) await db.blobs.put({ key: pdfKey(id), blob: kept.blob, name: kept.name });
+        else if (src.kind !== "pdf") {
+          const up = await db.blobs.get(uploadKey(id));
+          if (up) await db.blobs.put({ key: origKey(id), blob: up.blob, name: up.name });
+        }
+        // The source may have been deleted while we were writing: don't leave orphan blobs.
+        if (!(await db.sources.get(id))) await db.blobs.bulkDelete([origKey(id), pdfKey(id)]);
+      } catch {
+        /* best effort: keeping the original must never fail the source */
+      }
       await db.blobs.delete(uploadKey(id));
     } catch (e) {
       if (await db.sources.get(id)) await db.sources.update(id, { status: "failed", error: message(e) });
@@ -509,6 +522,7 @@ async function deleteSourceRows(id: number) {
   await db.chunks.where("source_id").equals(id).delete();
   await db.blobs.delete(uploadKey(id));
   await db.blobs.delete(pdfKey(id));
+  await db.blobs.delete(origKey(id));
   await db.sources.delete(id);
   forgetSource(id);
   forgetStats(id);
@@ -1167,6 +1181,11 @@ export const localApi = {
       while (pageReads.get(id)?.state === "running") await new Promise((r) => setTimeout(r, 10));
     },
   },
+  /** Title, length and caption availability of a YouTube link (null when unknown or not YouTube). */
+  youtubeInfo: async (raw: string) => {
+    const id = YOUTUBE_RE.test(raw.trim()) ? videoIdOf(raw.trim()) : null;
+    return id ? youtubeInfo(id) : null;
+  },
   addText: async (subjectId: number, title: string, text: string) => addParsed(subjectId, "text", parseText(text, title || null)),
   addUrl: async (subjectId: number, raw: string) => {
     let url = raw.trim();
@@ -1210,6 +1229,17 @@ export const localApi = {
     if (src.pages.length && n !== src.pages.length)
       throw new Error(`That PDF has ${n} pages but this source has ${src.pages.length}. Pick the same file you added.`);
     await db.blobs.put({ key: pdfKey(id), blob: file, name: (file as File).name });
+  },
+
+  /** The original file of a non-PDF source (photo, slides, document, recording), if this device kept it. */
+  sourceOriginal: async (id: number): Promise<{ blob: Blob; name: string } | null> => {
+    const r = await db.blobs.get(origKey(id));
+    return r ? { blob: r.blob, name: r.name ?? "original" } : null;
+  },
+  /** Attach the original file for a source added earlier or synced from another device. */
+  attachOriginal: async (id: number, file: Blob): Promise<void> => {
+    await need(db.sources.get(id), "Source not found");
+    await db.blobs.put({ key: origKey(id), blob: file, name: (file as File).name });
   },
 
   artifacts: async (subjectId: number, kind?: ArtifactKind): Promise<ArtifactSummary[]> => {

@@ -21,6 +21,7 @@ import { TrashIcon } from "./icons";
 import { ExamRunner, Exams } from "./ExamPractice";
 import QuizRunner, { DIFFICULTY_LABEL, QTYPES, similarRequest, typeLabel, type QType } from "./QuizRunner";
 import { MathText } from "./AnswerBody";
+import PracticeTimer from "./PracticeTimer";
 import { askConfirm } from "@/lib/confirm";
 import { useNavSub } from "@/lib/nav";
 
@@ -255,6 +256,9 @@ function ReviewSession(p: StudyProps & { deckId: number; onExit: () => void }) {
         </button>
         <p className="min-w-0 flex-1 truncate font-display text-lg">{deck?.title ?? "…"}</p>
         {queue && <p className="text-sm text-muted">{queue.length} left</p>}
+      </div>
+      <div className="mt-2 flex justify-end">
+        <PracticeTimer />
       </div>
       <div className="mt-3 h-1 overflow-hidden rounded-full bg-sunken">
         <div className="h-full bg-moss transition-all" style={{ width: `${total ? (done / total) * 100 : 0}%` }} />

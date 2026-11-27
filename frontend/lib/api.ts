@@ -302,6 +302,8 @@ const serverApi = {
   deleteSubject: (id: number) => send(`/subjects/${id}`, "DELETE").then((r) => json<void>(r)),
   sources: (subjectId: number) => fetch(`${API_URL}/subjects/${subjectId}/sources`).then((r) => json<Source[]>(r)),
   source: (id: number) => fetch(`${API_URL}/sources/${id}`).then((r) => json<SourceDetail>(r)),
+  /** Caption and length check for a YouTube link (phone and web app only; null here). */
+  youtubeInfo: async (_url: string): Promise<{ title: string; minutes: number | null; hasCaptions: boolean } | null> => null,
   addText: (subjectId: number, title: string, text: string) =>
     send(`/subjects/${subjectId}/sources/text`, "POST", { title: title || null, text }).then((r) => json<Source>(r)),
   addUrl: (subjectId: number, url: string) =>
@@ -395,6 +397,11 @@ const serverApi = {
   sourcePdf: async (_id: number): Promise<Blob | null> => null,
   attachPdf: async (_id: number, _file: Blob): Promise<void> => {
     throw new Error("Page view is only available in the phone and web app.");
+  },
+  /** The "Original" view of non-PDF sources is on-device only. */
+  sourceOriginal: async (_id: number): Promise<{ blob: Blob; name: string } | null> => null,
+  attachOriginal: async (_id: number, _file: Blob): Promise<void> => {
+    throw new Error("The original view is only available in the phone and web app.");
   },
   /** Reading pages with AI is on-device only. */
   hasPdf: async (_id: number): Promise<boolean> => false,
