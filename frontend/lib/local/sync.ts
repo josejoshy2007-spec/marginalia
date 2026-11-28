@@ -17,7 +17,11 @@
  *
  * A sync downloads library.json, merges it with this device (per row, the newer `updated_at` wins;
  * a tombstone always wins; rows whose parent is gone are dropped), applies the result here
- * (downloading new sources' content), then uploads the merged library and any new source content.
+ * (downloading new sources' content; one that can't be downloaded is skipped and retried next sync),
+ * WRITES THE MERGED LIBRARY, and only then uploads new source content one source at a time (a failed
+ * upload is recorded and skipped, never fatal). The library is written a second time if an upload moved a
+ * source's content revision, and old content files are cleaned up after that final write. So subjects,
+ * decks and cards always reach Drive even when a big source's upload keeps failing.
  * Merging is a union, so devices converge even if two sync at the same moment: the next sync
  * re-adds anything an overlapping upload missed. Sources still processing and items still being
  * generated stay on their device until they're ready.
@@ -64,9 +68,16 @@ export async function snapshotLocal(): Promise<Library> {
   for (const a of artifacts) for (const p of a.passages) cited.add(p.chunk_id);
   for (const t of threads) for (const turn of t.turns as any[]) for (const c of turn.citations ?? []) cited.add(c.chunk_id);
   for (const c of await db.chunks.bulkGet([...cited])) if (c) chunkOrd.set(c.id!, c.ord);
-  const toRemote = ({ source_id, chunk_id, ...p }: any) => ({
-    ...p, source: sourceUid.get(source_id) ?? null, chunk_ord: chunkOrd.get(chunk_id) ?? null,
+  // A reference whose source isn't on this device keeps the remote `source_uid` / `chunk_ord` (see applyLibrary) and sends them back unchanged.
+  const toRemote = ({ source_id, chunk_id, source_uid, chunk_ord, ...p }: any) => ({
+    ...p, source: sourceUid.get(source_id) ?? source_uid ?? null, chunk_ord: chunkOrd.get(chunk_id) ?? chunk_ord ?? null,
   });
+  const paramsToRemote = (params: any) => {
+    if (!Array.isArray(params.source_ids)) return params;
+    const { pending_source_uids, ...rest } = params;
+    const uids = (params.source_ids as number[]).map((x) => sourceUid.get(x)).filter(Boolean) as string[];
+    return { ...rest, source_ids: [...new Set([...uids, ...((pending_source_uids as string[] | undefined) ?? [])])] };
+  };
 
   const cards = (await db.cards.toArray()).filter((c) => artUid.has(c.deck_id));
   const attempts = (await db.attempts.toArray()).filter((t) => artUid.has(t.quiz_id));
@@ -84,18 +95,16 @@ export async function snapshotLocal(): Promise<Library> {
       .map(({ subject_id, passages, params, error: _e, ...a }) => ({
         ...strip(a),
         subject: subjectUid.get(subject_id),
-        params: Array.isArray(params.source_ids)
-          ? { ...params, source_ids: (params.source_ids as number[]).map((x) => sourceUid.get(x)).filter(Boolean) }
-          : params,
+        params: paramsToRemote(params),
         passages: passages.map(toRemote),
       }) as Rec),
     cards: cards.map(({ deck_id, ...c }) => ({ ...strip(c), deck: artUid.get(deck_id) }) as Rec),
     attempts: attempts.map(({ quiz_id, ...t }) => ({ ...strip(t), quiz: artUid.get(quiz_id) }) as Rec),
     // Conversations: a margin thread's source and every citation point at sources by uid.
-    threads: threads.map(({ subject_id, source_id, turns, ...t }) => ({
+    threads: threads.map(({ subject_id, source_id, source_uid, turns, ...t }: any) => ({
       ...strip(t),
       subject: subjectUid.get(subject_id),
-      source: source_id != null ? (sourceUid.get(source_id) ?? null) : null,
+      source: (source_id != null ? sourceUid.get(source_id) : undefined) ?? source_uid ?? null,
       turns: (turns as any[]).map((turn) => (turn.citations ? { ...turn, citations: turn.citations.map(toRemote) } : turn)),
     }) as Rec),
     tombstones: await db.tombstones.toArray(),
@@ -246,11 +255,27 @@ async function adoptContent(sourceId: number, subjectId: number, content: Conten
 const uidMap = async (table: SyncedTable) =>
   new Map((await db.table(table).toArray()).map((r: any) => [r.uid as string, r]));
 
-export type ApplyResult = { added: number; updated: number; removed: number; missing: string[] };
+export type Counts = { subjects: number; sources: number; items: number; cards: number };
+const zero = (): Counts => ({ subjects: 0, sources: 0, items: 0, cards: 0 });
+
+/** What a sync did, in plain counts, for the Settings screen. */
+export type SyncReport = {
+  sent: Counts; // rows this device added or changed that Drive didn't have yet
+  received: Counts; // rows added or changed on this device
+  inDrive: Counts; // totals of the library as written
+  uploadFailed: string[]; // titles of sources whose content couldn't be uploaded
+  downloadFailed: string[]; // titles of sources whose content couldn't be downloaded
+  waitingHere: number; // sources / items still being made (they sync once ready)
+};
+export type ApplyResult = { added: number; updated: number; removed: number; missing: string[]; received?: Counts };
+export type SyncResult = ApplyResult & { report: SyncReport };
+
+type Fetched = { content: Content; rev: number; tag: string };
 
 /** Make this device match `lib`. `fetchContent` returns a source's content file (null if absent). */
-export async function applyLibrary(lib: Library, local: Library, fetchContent: (uid: string, rev: number, tag: string) => Promise<Content | null>): Promise<ApplyResult> {
-  const res: ApplyResult = { added: 0, updated: 0, removed: 0, missing: [] };
+export async function applyLibrary(lib: Library, local: Library, fetchContent: (uid: string, rev: number, tag: string, newest: boolean) => Promise<Fetched | null>): Promise<ApplyResult> {
+  const got = zero();
+  const res: ApplyResult = { added: 0, updated: 0, removed: 0, missing: [], received: got };
   syncState.applying = true;
   try {
     await db.tombstones.bulkPut(lib.tombstones);
@@ -261,8 +286,8 @@ export async function applyLibrary(lib: Library, local: Library, fetchContent: (
     for (const r of lib.subjects) {
       const cur = subjects.get(r.uid);
       const row = { uid: r.uid, updated_at: r.updated_at, name: r.name, created_at: r.created_at, ib_course: r.ib_course ?? null, ib_level: r.ib_level ?? null };
-      if (!cur) (await db.subjects.add(row), res.added++);
-      else if (newer(cur, r)) (await db.subjects.update(cur.id, row), res.updated++);
+      if (!cur) (await db.subjects.add(row), res.added++, got.subjects++);
+      else if (newer(cur, r)) (await db.subjects.update(cur.id, row), res.updated++, got.subjects++);
     }
     subjects = await uidMap("subjects");
 
@@ -277,25 +302,28 @@ export async function applyLibrary(lib: Library, local: Library, fetchContent: (
       if (cur) {
         // AI page readings added on another device: adopt that revision's content (kept if its file isn't there yet).
         if (cmpContent({ rev, tag }, contentOf(cur)) > 0 && cur.status === "ready") {
-          const content = await fetchContent(r.uid, rev, tag);
-          if (content) {
-            if (await adoptContent(cur.id, subject.id, content, rev, tag, r.updated_at)) res.updated++;
+          const fetched = await fetchContent(r.uid, rev, tag, false);
+          if (fetched) {
+            if (await adoptContent(cur.id, subject.id, fetched.content, rev, tag, r.updated_at)) (res.updated++, got.sources++);
           } else res.missing.push(r.uid);
         }
-        if (newer(cur, r)) (await db.sources.update(cur.id, meta), res.updated++);
+        if (newer(cur, r)) (await db.sources.update(cur.id, meta), res.updated++, got.sources++);
         continue;
       }
-      const content = await fetchContent(r.uid, rev, tag);
-      if (!content) {
+      // If the exact revision isn't on Drive yet, take the newest one that is; the adopt path upgrades it later.
+      const fetched = await fetchContent(r.uid, rev, tag, true);
+      if (!fetched) {
         res.missing.push(r.uid);
         continue;
       }
+      const { content, rev: frev, tag: ftag } = fetched;
+      if (cmpContent({ rev: frev, tag: ftag }, { rev, tag }) !== 0) res.missing.push(r.uid);
       // Vectors from an older engine (e.g. 768-d Gemini) are kept for keyword fallback and re-embedded on the device.
       // A scanned PDF nobody has read yet has no chunks at all: that is a finished source, not an unindexed one.
       const usable = (content.chunks.length > 0 && unb64(content.chunks[0].e).length > 0) || (!content.chunks.length && !content.text.trim());
       const id = await db.sources.add({
         ...meta, text: content.text, pages: content.pages, status: usable ? "ready" : "processing", error: null,
-        ...(content.ai_pages?.length ? { ai_pages: content.ai_pages } : {}), content_rev: rev, ...(tag ? { content_tag: tag } : {}), ...(content.no_text_layer ? { no_text_layer: true } : {}),
+        ...(content.ai_pages?.length ? { ai_pages: content.ai_pages } : {}), content_rev: frev, ...(ftag ? { content_tag: ftag } : {}), ...(content.no_text_layer ? { no_text_layer: true } : {}),
       });
       if (usable)
         await db.chunks.bulkAdd(
@@ -305,6 +333,7 @@ export async function applyLibrary(lib: Library, local: Library, fetchContent: (
           })),
         );
       res.added++;
+      got.sources++;
     }
     sources = await uidMap("sources");
 
@@ -319,26 +348,53 @@ export async function applyLibrary(lib: Library, local: Library, fetchContent: (
       }
       return chunkIds.get(key)!;
     };
+    // A reference to a source that isn't on this device yet keeps the remote uid + chunk_ord, so it is sent back
+    // unchanged and repaired once the source arrives.
+    const mapRef = async (p: any) => {
+      const { source, chunk_ord, ...rest } = p;
+      const sid = sources.get(source)?.id ?? -1;
+      const cid = await chunkId(sid, chunk_ord);
+      return { ...rest, source_id: sid, chunk_id: cid, ...(cid < 0 && source ? { source_uid: source, chunk_ord } : {}) };
+    };
+    const mapParams = (params: any) => {
+      if (!Array.isArray(params?.source_ids)) return params ?? {};
+      const ids: number[] = [];
+      const pending: string[] = [];
+      for (const u of params.source_ids as string[]) {
+        const id = sources.get(u)?.id;
+        if (id != null) ids.push(id);
+        else pending.push(u);
+      }
+      const { pending_source_uids: _p, ...rest } = params;
+      return { ...rest, source_ids: ids, ...(pending.length ? { pending_source_uids: pending } : {}) };
+    };
+    const pendingOf = (x: any) =>
+      (x.passages ?? []).filter((p: any) => p.source_uid).length + (x.params?.pending_source_uids?.length ?? 0);
     let artifacts = await uidMap("artifacts");
     for (const r of lib.artifacts) {
       const cur = artifacts.get(r.uid);
       const subject = subjects.get(r.subject);
-      if (!subject || (cur && !newer(cur, r))) continue;
+      if (!subject) continue;
+      // Unchanged and fully resolved: nothing to do (and no need to load its sources' chunks).
+      if (cur && !newer(cur, r) && pendingOf(cur) === 0) continue;
       const passages = [];
-      for (const p of r.passages ?? []) {
-        const { source, chunk_ord, ...rest } = p;
-        const sid = sources.get(source)?.id ?? -1;
-        passages.push({ ...rest, source_id: sid, chunk_id: await chunkId(sid, chunk_ord) });
+      for (const p of r.passages ?? []) passages.push(await mapRef(p));
+      const params = mapParams(r.params);
+      if (cur && !newer(cur, r)) {
+        // Unchanged item that arrived before its source: now that the source is here, resolve its citations.
+        if (pendingOf(cur) > pendingOf({ passages, params })) {
+          await db.artifacts.update(cur.id, { passages, params, updated_at: cur.updated_at });
+          res.updated++;
+          got.items++;
+        }
+        continue;
       }
-      const params = Array.isArray(r.params?.source_ids)
-        ? { ...r.params, source_ids: r.params.source_ids.map((u: string) => sources.get(u)?.id).filter((x: unknown) => x != null) }
-        : (r.params ?? {});
       const row = {
         uid: r.uid, updated_at: r.updated_at, subject_id: subject.id, kind: r.kind, subtype: r.subtype ?? "", title: r.title,
         params, content: r.content ?? {}, passages, status: "ready" as const, error: null, created_at: r.created_at,
       };
-      if (!cur) (await db.artifacts.add(row), res.added++);
-      else (await db.artifacts.update(cur.id, row), res.updated++);
+      if (!cur) (await db.artifacts.add(row), res.added++, got.items++);
+      else (await db.artifacts.update(cur.id, row), res.updated++, got.items++);
     }
     artifacts = await uidMap("artifacts");
 
@@ -348,8 +404,8 @@ export async function applyLibrary(lib: Library, local: Library, fetchContent: (
       const deck = artifacts.get(r.deck);
       if (!deck || (cur && !newer(cur, r))) continue;
       const { deck: _d, ...rest } = r;
-      if (!cur) (await db.cards.add({ ...rest, deck_id: deck.id } as any), res.added++);
-      else (await db.cards.update(cur.id, { ...rest, deck_id: deck.id }), res.updated++);
+      if (!cur) (await db.cards.add({ ...rest, deck_id: deck.id } as any), res.added++, got.cards++);
+      else (await db.cards.update(cur.id, { ...rest, deck_id: deck.id }), res.updated++, got.cards++);
     }
     const attempts = await uidMap("attempts");
     for (const r of lib.attempts) {
@@ -366,7 +422,10 @@ export async function applyLibrary(lib: Library, local: Library, fetchContent: (
     for (const r of lib.threads ?? []) {
       const cur = threads.get(r.uid);
       const subject = subjects.get(r.subject);
-      if (!subject || (cur && !newer(cur, r))) continue;
+      if (!subject) continue;
+      const pend = (x: any) =>
+        (x.turns ?? []).reduce((n: number, t: any) => n + (t.citations ?? []).filter((c: any) => c.source_uid).length, 0) + (x.source_uid ? 1 : 0);
+      if (cur && !newer(cur, r) && pend(cur) === 0) continue;
       const turns = [];
       for (const turn of r.turns ?? []) {
         if (!turn.citations) {
@@ -374,14 +433,20 @@ export async function applyLibrary(lib: Library, local: Library, fetchContent: (
           continue;
         }
         const citations = [];
-        for (const { source, chunk_ord, ...c } of turn.citations) {
-          const sid = sources.get(source)?.id ?? -1;
-          citations.push({ ...c, source_id: sid, chunk_id: await chunkId(sid, chunk_ord) });
-        }
+        for (const c of turn.citations) citations.push(await mapRef(c));
         turns.push({ ...turn, citations });
       }
       const { subject: _s, source, ...rest } = r;
-      const row = { ...rest, subject_id: subject.id, source_id: source ? (sources.get(source)?.id ?? null) : null, turns };
+      const sourceId = source ? (sources.get(source)?.id ?? null) : null;
+      const row = { ...rest, subject_id: subject.id, source_id: sourceId, source_uid: source && sourceId == null ? source : null, turns };
+      if (cur && !newer(cur, r)) {
+        if (pend(cur) > pend(row)) {
+          await db.threads.update(cur.id, { ...row, updated_at: cur.updated_at } as any);
+          res.updated++;
+          got.items++;
+        }
+        continue;
+      }
       if (!cur) (await db.threads.add(row as any), res.added++);
       else (await db.threads.update(cur.id, row), res.updated++);
     }
@@ -426,8 +491,39 @@ function setStatus(s: SyncStatus) {
   if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("marginalia:sync-status", { detail: s }));
 }
 
+const COUNT_TABLES: [keyof Counts, SyncedTable][] = [["subjects", "subjects"], ["sources", "sources"], ["items", "artifacts"], ["cards", "cards"]];
+
+/** Rows in this device's snapshot that Drive didn't have, or had an older copy of. */
+function countSent(local: Library, remote: Library | null, merged: Library): Counts {
+  const out = zero();
+  for (const [key, table] of COUNT_TABLES) {
+    const theirs = new Map((remote?.[table] ?? []).map((r) => [r.uid, r]));
+    const alive = new Set(merged[table].map((r) => r.uid));
+    for (const r of local[table]) {
+      const t = theirs.get(r.uid);
+      if (alive.has(r.uid) && (!t || t.updated_at < r.updated_at)) out[key]++;
+    }
+  }
+  return out;
+}
+
+const reportReady = new WeakSet<SyncReport>();
+
+/** An error that carries what the sync had done before it failed. */
+export type PartialReport = { partialReport?: SyncReport };
+
 /** Run one full sync against `drive`. Exported separately so tests can pass a fake Drive. */
-export async function syncWith(drive: Drive, onStage: (s: string) => void = () => {}): Promise<ApplyResult> {
+export async function syncWith(drive: Drive, onStage: (s: string) => void = () => {}): Promise<SyncResult> {
+  const report: SyncReport = { sent: zero(), received: zero(), inDrive: zero(), uploadFailed: [], downloadFailed: [], waitingHere: 0 };
+  try {
+    return await syncInner(drive, onStage, report);
+  } catch (e) {
+    if (e && typeof e === "object" && reportReady.has(report)) (e as PartialReport).partialReport = report;
+    throw e;
+  }
+}
+
+async function syncInner(drive: Drive, onStage: (s: string) => void, report: SyncReport): Promise<SyncResult> {
   onStage("Checking Google Drive");
   const files = new Map<string, DriveFile>((await drive.list()).map((f) => [f.name, f]));
   const libFile = files.get(LIBRARY);
@@ -436,11 +532,40 @@ export async function syncWith(drive: Drive, onStage: (s: string) => void = () =
 
   const local = await snapshotLocal();
   const merged = merge(local, remote);
+  reportReady.add(report); // from here on a failure carries a report
+  const sent = countSent(local, remote, merged);
+  report.waitingHere =
+    (await db.sources.filter((s) => s.status === "processing").count()) + (await db.artifacts.filter((a) => a.status === "processing").count());
+  const titleOf = (uid: string) => merged.sources.find((r) => r.uid === uid)?.title ?? uid;
   onStage("Bringing in changes");
-  const result = await applyLibrary(merged, local, async (uid, rev, tag) => {
-    const f = files.get(contentName(uid, rev, tag));
-    return f ? ((await drive.read(f.id)) as Content) : null;
+  const result = await applyLibrary(merged, local, async (uid, rev, tag, newest) => {
+    let f = files.get(contentName(uid, rev, tag));
+    let found = { rev, tag };
+    if (!f && newest) {
+      // The newest content file that IS on Drive for this source (the library may point at a revision not uploaded yet).
+      for (const x of files.values()) {
+        const c = parseContentName(x.name);
+        if (c && c.uid === uid && (!f || cmpContent(c, found) > 0)) (f = x, found = { rev: c.rev, tag: c.tag });
+      }
+    }
+    if (!f) return null;
+    try {
+      return { content: (await drive.read(f.id)) as Content, ...found };
+    } catch (e) {
+      if (e instanceof AuthNeeded) throw e;
+      // One big file that won't download must not stop decks and cards from arriving: treat it as missing, retry next sync.
+      const t = titleOf(uid);
+      if (!report.downloadFailed.includes(t)) report.downloadFailed.push(t);
+      return null;
+    }
   });
+  report.received = result.received ?? zero();
+
+  // Save the library FIRST: subjects, decks, cards and marks must reach Drive even if a big source's upload fails.
+  onStage("Saving to Google Drive");
+  const libWrite = await drive.write(LIBRARY, merged, libFile?.id);
+  report.sent = sent;
+  report.inDrive = { subjects: merged.subjects.length, sources: merged.sources.length, items: merged.artifacts.length, cards: merged.cards.length };
 
   // Upload content Drive doesn't have yet (a new source, or a new revision after AI page readings).
   // The revision uploaded is this device's own: a device that couldn't fetch a newer one must not file old content under it.
@@ -455,44 +580,61 @@ export async function syncWith(drive: Drive, onStage: (s: string) => void = () =
     if (c) have.set(c.uid, Math.max(have.get(c.uid) ?? -1, c.rev));
   }
   const uploaded = new Set<string>();
+  const failedUids = new Set<string>();
+  let repoint = false;
   for (let i = 0; i < toUpload.length; i++) {
     onStage(`Uploading sources (${i + 1}/${toUpload.length})`);
     const row = mine.get(toUpload[i].uid);
     // A page-reading run is appending to this source: upload it on the next sync.
     if ((await localApi.pageReadStatus(row.id))?.state === "running") continue;
-    const snap = await sourceContent(row.id);
-    const name = contentName(toUpload[i].uid, snap.rev, snap.tag);
-    await drive.write(name, snap.content);
-    uploaded.add(name);
-    have.set(toUpload[i].uid, Math.max(have.get(toUpload[i].uid) ?? -1, snap.rev));
-    // The library must point at the content just uploaded (this device may be ahead of the merged row).
-    toUpload[i].content_rev = snap.rev;
-    if (snap.tag) toUpload[i].content_tag = snap.tag;
-    else delete toUpload[i].content_tag;
+    try {
+      const snap = await sourceContent(row.id);
+      const name = contentName(toUpload[i].uid, snap.rev, snap.tag);
+      await drive.write(name, snap.content);
+      uploaded.add(name);
+      have.set(toUpload[i].uid, Math.max(have.get(toUpload[i].uid) ?? -1, snap.rev));
+      // The library must point at the content just uploaded (this device may be ahead of the merged row).
+      if (cmpContent(contentOf(toUpload[i]), { rev: snap.rev, tag: snap.tag }) !== 0) repoint = true;
+      toUpload[i].content_rev = snap.rev;
+      if (snap.tag) toUpload[i].content_tag = snap.tag;
+      else delete toUpload[i].content_tag;
+    } catch (e) {
+      if (e instanceof AuthNeeded) throw e;
+      failedUids.add(toUpload[i].uid);
+      report.uploadFailed.push(toUpload[i].title);
+    }
   }
-  // Sources whose content was missing stay out of the library until a device that has them uploads it.
-  onStage("Saving to Google Drive");
-  await drive.write(LIBRARY, merged, libFile?.id);
+  if (repoint) {
+    onStage("Saving to Google Drive");
+    await drive.write(LIBRARY, merged, libFile?.id ?? libWrite?.id);
+  }
   // Housekeeping once the library points at the new files: content of deleted sources, and superseded revisions.
+  // Never for a source whose upload failed this run.
   const gone = new Set(merged.tombstones.filter((t) => t.table === "sources").map((t) => t.uid));
   const current = new Map(merged.sources.map((r) => [r.uid, contentOf(r)]));
   const exists = (name: string) => files.has(name) || uploaded.has(name);
   for (const f of files.values()) {
     const c = parseContentName(f.name);
-    if (!c) continue;
+    if (!c || failedUids.has(c.uid)) continue;
     const cur = current.get(c.uid);
+    // Never delete anything for a source unless the file the library points at is on Drive.
+    if (cur && !exists(contentName(c.uid, cur.rev, cur.tag))) continue;
     const older = !!cur && c.rev < Math.min(cur.rev, have.get(c.uid) ?? 0);
     // Same revision, other tag: the loser of a concurrent edit, once the winner's file is on Drive.
     const loser = !!cur && c.rev === cur.rev && c.tag !== cur.tag && exists(contentName(c.uid, cur.rev, cur.tag));
-    if (gone.has(c.uid) || older || loser) await drive.remove(f.id);
+    if (gone.has(c.uid) || older || loser) await drive.remove(f.id).catch((e) => {
+      if (e instanceof AuthNeeded) throw e; // anything else is cleaned up on the next sync
+    });
   }
-  return result;
+  return { ...result, report };
 }
 
-let running: Promise<ApplyResult | null> | null = null;
+export type SavedSyncReport = { at: string; report: SyncReport; error?: string };
+
+let running: Promise<SyncResult | null> | null = null;
 
 /** Sync now. `interactive` (from a tap) may show Google sign-in; background syncs never do. */
-export function syncNow(interactive = false): Promise<ApplyResult | null> {
+export function syncNow(interactive = false): Promise<SyncResult | null> {
   // From a tap, ask for the token before anything else so a browser lets Google's window open.
   const tapToken = interactive ? driveToken(true) : null;
   tapToken?.catch(() => {});
@@ -505,7 +647,7 @@ export function syncNow(interactive = false): Promise<ApplyResult | null> {
       const email = s.syncEmail || (await drive.email());
       const res = await syncWith(drive, (stage) => setStatus({ state: "syncing", stage }));
       const lastSyncAt = now();
-      await saveSettings({ lastSyncAt, syncEmail: email ?? "" });
+      await saveSettings({ lastSyncAt, syncEmail: email ?? "", lastSyncReport: { at: lastSyncAt, report: res.report } });
       setStatus({ state: "idle", lastSyncAt, email });
       if (res.added || res.updated || res.removed) {
         window.dispatchEvent(new Event("marginalia:library-changed"));
@@ -513,6 +655,8 @@ export function syncNow(interactive = false): Promise<ApplyResult | null> {
       }
       return res;
     } catch (e) {
+      const partial = (e as PartialReport).partialReport;
+      if (partial) await saveSettings({ lastSyncReport: { at: now(), report: partial, error: (e as Error).message } }).catch(() => {});
       if (e instanceof AuthNeeded) setStatus({ state: "auth", message: e.message });
       else setStatus({ state: "error", message: (e as Error).message || "Sync failed." });
       if (interactive) throw e;
@@ -525,7 +669,7 @@ export function syncNow(interactive = false): Promise<ApplyResult | null> {
 }
 
 /** Turn sync on from a tap: signs in, then does a first sync. */
-export async function connect(): Promise<ApplyResult | null> {
+export async function connect(): Promise<SyncResult | null> {
   await driveToken(true); // opens Google's sign-in right away, inside the tap
   await saveSettings({ syncOn: true });
   return syncNow(true);
@@ -534,7 +678,7 @@ export async function connect(): Promise<ApplyResult | null> {
 export async function disconnect() {
   const { signOut } = await import("./google");
   await signOut();
-  await saveSettings({ syncOn: false, syncEmail: "", lastSyncAt: "" });
+  await saveSettings({ syncOn: false, syncEmail: "", lastSyncAt: "", lastSyncReport: null });
   setStatus({ state: "off" });
 }
 

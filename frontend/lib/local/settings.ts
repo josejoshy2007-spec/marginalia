@@ -23,6 +23,7 @@ export type Settings = {
   syncOn: boolean; // Google Drive sync connected
   syncEmail: string;
   lastSyncAt: string;
+  lastSyncReport: import("./sync").SavedSyncReport | null; // what the latest Drive sync did (Settings, Sync)
   dailyBudget: number; // max Gemini requests per local day; 0 = no limit (usage.ts)
   exhausted: Record<string, string>; // model -> ISO time its free daily quota resets (skipped until then)
 };
@@ -49,6 +50,7 @@ export const DEFAULTS: Settings = {
   syncOn: false,
   syncEmail: "",
   lastSyncAt: "",
+  lastSyncReport: null,
   dailyBudget: 750,
   exhausted: {},
 };

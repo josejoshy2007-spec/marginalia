@@ -9,10 +9,13 @@ import path from "node:path";
 const { db } = await import("../lib/local/db");
 const { localApi } = await import("../lib/local/store");
 const { syncWith } = await import("../lib/local/sync");
-import type { Drive, DriveFile } from "../lib/local/drive";
+import { DriveError, type Drive, type DriveFile } from "../lib/local/drive";
 
 const dir = process.argv[2];
 mkdirSync(dir, { recursive: true });
+
+/** Fault injection: while set, writes / reads of Drive files whose name starts with "source-" fail like a dropped connection. */
+const fault = { write: false, read: false };
 
 /** Drive stand-in: one JSON file per Drive file, id = name. */
 const drive: Drive = {
@@ -20,9 +23,11 @@ const drive: Drive = {
     return readdirSync(dir).map((name) => ({ id: name, name, modifiedTime: "" }) as DriveFile);
   },
   async read(id) {
+    if (fault.read && id.startsWith("source-")) throw new DriveError("Couldn't reach Google Drive. Check your internet connection.");
     return JSON.parse(readFileSync(path.join(dir, id), "utf8"));
   },
   async write(name, data) {
+    if (fault.write && name.startsWith("source-")) throw new DriveError("Couldn't reach Google Drive. Check your internet connection.");
     writeFileSync(path.join(dir, name), JSON.stringify(data));
     return { id: name, name, modifiedTime: "" };
   },
@@ -126,6 +131,11 @@ const commands: Record<string, (a: any) => Promise<unknown>> = {
     const card = (await db.cards.where("deck_id").equals(d.id!).toArray()).find((c) => c.front === front)!;
     await localApi.deleteCard(card.id!);
   },
+  /** An edit to a deck (newer updated_at, same content). */
+  async touchDeck({ title }) {
+    const d = (await db.artifacts.toArray()).find((a) => a.title === title)!;
+    await db.artifacts.update(d.id!, { updated_at: new Date(Date.now() + 5).toISOString() });
+  },
   async deleteDeck({ title }) {
     await localApi.deleteArtifact((await db.artifacts.toArray()).find((a) => a.title === title)!.id!);
   },
@@ -133,16 +143,18 @@ const commands: Record<string, (a: any) => Promise<unknown>> = {
     await localApi.deleteSubject(await subjectId(name));
   },
   /** A saved Ask AI conversation; with `source`, its answer cites that source's last chunk. */
-  async conversation({ subject, title, source, mode = "sources" }) {
+  async conversation({ subject, title, source, mode = "sources", kind = "ask" }) {
     const sid = await subjectId(subject);
     let citations: any[] = [];
+    let sourceId: number | undefined;
     if (source) {
       const src = (await db.sources.toArray()).find((s) => s.title === source)!;
       const chunk = (await db.chunks.where("source_id").equals(src.id!).sortBy("ord")).at(-1)!;
+      if (kind === "margin") sourceId = src.id;
       citations = [{ source_id: src.id, source_title: src.title, chunk_id: chunk.id, start: chunk.char_start, end: chunk.char_end, page: null, cited_text: chunk.text }];
     }
     const t = {
-      id: crypto.randomUUID(), kind: "ask", mode, title, busy: false, createdAt: new Date().toISOString(),
+      id: crypto.randomUUID(), kind, mode, title, sourceId, busy: false, createdAt: new Date().toISOString(),
       turns: [{ role: "user", text: `${title}?` }, { role: "assistant", body: citations.length ? "Answer ⟦1⟧" : "Answer", citations }],
     };
     await localApi.saveThread(sid, t as any);
@@ -154,6 +166,11 @@ const commands: Record<string, (a: any) => Promise<unknown>> = {
   /** What the app shows for a subject's conversations (localApi.threads, as the UI loads them). */
   async conversations({ subject }) {
     return (await localApi.threads(await subjectId(subject))).map((t) => `${t.title}:${t.mode}:${t.turns.length}`).sort();
+  },
+  /** Make this device's Drive fail on source content files (`write` / `read`), or clear it (no args). */
+  async fault({ write = false, read = false } = {}) {
+    fault.write = write;
+    fault.read = read;
   },
   async sync() {
     return syncWith(drive);

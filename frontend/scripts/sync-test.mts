@@ -4,7 +4,7 @@
  *   npx tsx scripts/sync-test.mts
  */
 import { fork, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -276,6 +276,149 @@ try {
       }
       assert.deepEqual(get(ac), get(bc));
     });
+  }
+
+  // 16. A source's content file can't be uploaded (flaky network): the library, deck and cards must still reach
+  // Drive, and the other device gets them. Once the fault clears, the source follows.
+  const library = () => JSON.parse(readFileSync(path.join(driveDir, "library.json.gz"), "utf8"));
+  const sourceFiles = () => readdirSync(driveDir).filter((f) => f.startsWith("source-")).length;
+  const decksOf = (st: any, subject: string) => st[subject]?.decks ?? [];
+  await A.run("subject", { name: "Faulty" });
+  await A.run("source", { subject: "Faulty", title: "Big" });
+  await A.run("deck", { subject: "Faulty", source: "Big", title: "Faulty deck" });
+  const filesBefore = sourceFiles();
+  await A.run("fault", { write: true });
+  const ra = await A.run("sync");
+  check("upload failure: library with the deck and cards is still written; report names the failed source", () => {
+    const lib = library();
+    const deck = lib.artifacts.find((x: any) => x.title === "Faulty deck");
+    assert.ok(deck);
+    assert.equal(lib.cards.filter((c: any) => c.deck === deck.uid).length, 2);
+    assert.equal(sourceFiles(), filesBefore);
+    assert.deepEqual(ra.report.uploadFailed, ["Big"]);
+    assert.ok(ra.report.sent.cards >= 2 && ra.report.sent.items >= 1 && ra.report.sent.subjects >= 1);
+    assert.ok(ra.report.inDrive.cards >= 2);
+  });
+  const rb = await B.run("sync");
+  const b16 = await B.run("state");
+  check("B gets the deck and its cards; the source is reported missing", () => {
+    assert.deepEqual(decksOf(b16, "Faulty").map((d: any) => [d.title, d.cards.length]), [["Faulty deck", 2]]);
+    assert.deepEqual(b16.Faulty.sources, []);
+    assert.equal(rb.missing.length, 1);
+    assert.ok(rb.report.received.cards >= 2 && rb.report.received.items >= 1);
+    assert.deepEqual(rb.report.uploadFailed, []);
+  });
+  await A.run("fault");
+  const ra2 = await A.run("sync");
+  await B.run("sync");
+  const b16b = await B.run("state");
+  check("after the fault clears the source uploads and B receives it", () => {
+    assert.deepEqual(ra2.report.uploadFailed, []);
+    assert.equal(sourceFiles(), filesBefore + 1);
+    assert.deepEqual(b16b.Faulty.sources, [{ title: "Big", status: "ready", chunks: 3, textOk: true }]);
+    assert.equal(b16b.Faulty.decks[0].citation, "Gamma paragraph.");
+  });
+
+  // 17. B can't download a source's content file: it still gets the deck and cards, and keeps the source in the library.
+  await A.run("subject", { name: "Reader" });
+  await A.run("source", { subject: "Reader", title: "Heavy" });
+  await A.run("deck", { subject: "Reader", source: "Heavy", title: "Reader deck" });
+  await A.run("sync");
+  await B.run("fault", { read: true });
+  const rb2 = await B.run("sync");
+  const b17 = await B.run("state");
+  check("failed download: B still gets the deck and cards; report names the source; library keeps it", () => {
+    assert.deepEqual(decksOf(b17, "Reader").map((d: any) => [d.title, d.cards.length]), [["Reader deck", 2]]);
+    assert.deepEqual(b17.Reader.sources, []);
+    assert.deepEqual(rb2.report.downloadFailed, ["Heavy"]);
+    assert.ok(library().sources.some((s: any) => s.title === "Heavy"));
+  });
+  await B.run("fault");
+  await B.run("sync");
+  const b17b = await B.run("state");
+  check("after the fault clears B downloads the source", () => {
+    assert.deepEqual(b17b.Reader.sources.map((s: any) => s.title), ["Heavy"]);
+  });
+
+  // 18. Items that cite a source this device doesn't have yet (its upload failed): the references survive on
+  // Drive and on the original device whatever the receiving device does, and resolve once the source arrives.
+  await A.run("subject", { name: "Cites" });
+  await A.run("source", { subject: "Cites", title: "Src" });
+  await A.run("deck", { subject: "Cites", source: "Src", title: "Cites deck" });
+  await A.run("conversation", { subject: "Cites", title: "Cites chat", source: "Src" });
+  await A.run("conversation", { subject: "Cites", title: "Cites margin", source: "Src", kind: "margin" });
+  await A.run("fault", { write: true });
+  await A.run("sync");
+  await B.run("sync");
+  await B.run("sync");
+  const refsIntact = () => {
+    const lib = library();
+    const srcUid = lib.sources.find((s: any) => s.title === "Src").uid;
+    const deck = lib.artifacts.find((x: any) => x.title === "Cites deck");
+    const chat = lib.threads.find((t: any) => t.title === "Cites chat");
+    const margin = lib.threads.find((t: any) => t.title === "Cites margin");
+    return (
+      deck.passages.every((p: any) => p.source === srcUid && p.chunk_ord === 2) &&
+      deck.params.source_ids.length === 1 && deck.params.source_ids[0] === srcUid &&
+      chat.turns.flatMap((t: any) => t.citations ?? []).every((c: any) => c.source === srcUid && c.chunk_ord === 2) &&
+      margin.source === srcUid
+    );
+  };
+  check("B's two syncs while the source is missing leave every reference on Drive intact", () => assert.ok(refsIntact()));
+  // B edits the deck (a newer updated_at) while the source is missing; A syncs it back.
+  await B.run("touchDeck", { title: "Cites deck" });
+  await B.run("sync");
+  await A.run("sync");
+  const a18 = await A.run("state");
+  check("B's edit while the source is missing doesn't wipe citations on Drive or on A", () => {
+    assert.ok(refsIntact());
+    assert.equal(a18.Cites.decks[0].citation, "Gamma paragraph.");
+    assert.ok(a18.Cites.decks[0].paramsOk);
+    assert.deepEqual(a18.Cites.conversations.map((c: any) => c.citation), ["Gamma paragraph.", "Gamma paragraph."]);
+  });
+  await A.run("fault");
+  await A.run("sync");
+  const rb18 = await B.run("sync");
+  const b18 = await B.run("state");
+  check("once the source arrives B's deck, conversation and margin thread are repaired (and counted as updates)", () => {
+    assert.deepEqual(b18.Cites.sources.map((s: any) => s.title), ["Src"]);
+    assert.equal(b18.Cites.decks[0].citation, "Gamma paragraph.");
+    assert.ok(b18.Cites.decks[0].paramsOk);
+    assert.deepEqual(b18.Cites.conversations.map((c: any) => c.citation), ["Gamma paragraph.", "Gamma paragraph."]);
+    assert.ok(rb18.updated >= 3);
+    assert.ok(refsIntact());
+  });
+
+  // 19. A new device when Drive only has an older revision of a source: it gets that revision, nothing is deleted.
+  await A.run("subject", { name: "Revs" });
+  await A.run("pdfSource", { subject: "Revs", title: "Old" });
+  await A.run("sync");
+  await A.run("fault", { write: true });
+  await A.run("aiRead", { title: "Old", page: 2, text: "A reading that fails to upload." });
+  const ra19 = await A.run("sync");
+  const C = device("C");
+  try {
+    await C.run("sync");
+    const old = (st: any) => st.Revs.sources.find((x: any) => x.title === "Old");
+    const c19 = old(await C.run("state"));
+    check("new device gets the older revision when the newest isn't on Drive; the older file is kept", () => {
+      assert.deepEqual(ra19.report.uploadFailed, ["Old"]);
+      assert.equal(c19.rev, 0);
+      assert.equal(c19.chunks, 3);
+      assert.equal(c19.invariantOk, true);
+      assert.ok(readdirSync(driveDir).some((f) => /^source-.*\.json\.gz$/.test(f) && !/\.r\d/.test(f) && readFileSync(path.join(driveDir, f), "utf8").includes("Atoms have a nucleus.")));
+    });
+    await A.run("fault");
+    await A.run("sync");
+    await C.run("sync");
+    const c19b = old(await C.run("state"));
+    check("when the newest revision is uploaded, the new device adopts it", () => {
+      assert.equal(c19b.rev, 1);
+      assert.deepEqual(c19b.ai, ["2:A reading that fails to upload."]);
+      assert.equal(c19b.invariantOk, true);
+    });
+  } finally {
+    C.stop();
   }
 
   console.log(`\nALL ${passed} SYNC CHECKS PASSED`);
