@@ -93,9 +93,9 @@ export async function applyAiReading(sourceId: number, page: number, reading: st
   return db.transaction("rw", db.sources, db.chunks, async () => {
     const src = await db.sources.get(sourceId);
     if (!src) throw new Error("Source not found");
-    if (src.kind !== "pdf") throw new Error("Only PDFs can be read page by page.");
+    if (src.kind !== "pdf" && src.kind !== "slides") throw new Error("Only PDFs and slides can be read with AI.");
     if (src.status !== "ready") throw new Error("Wait until the source is ready");
-    if (page < 1 || page > src.pages.length) throw new Error(`This PDF has ${src.pages.length} pages.`);
+    if (page < 1 || page > src.pages.length) throw new Error(`This ${src.kind === "slides" ? "deck" : "PDF"} has ${src.pages.length} ${src.kind === "slides" ? "slides" : "pages"}.`);
     const plan = planAiAppend(src.text, src.ai_pages ?? [], page, reading);
     const chunks = await db.chunks.where("source_id").equals(sourceId).toArray();
     let removed = 0;

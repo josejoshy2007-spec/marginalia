@@ -14,6 +14,7 @@ import type { PageSpan, SourceRow } from "./db";
 import { GeminiError, generateJson } from "./gemini";
 import { normalize, ParseError, type ParsedDoc } from "./parse";
 import { blobToBase64 } from "./vision";
+import { MIN_PICTURE_BYTES } from "./pageread";
 
 export type FileKind = Extract<SourceRow["kind"], "pdf" | "slides" | "doc" | "sheet" | "image">;
 type Format = { kind: FileKind; read: (file: Blob, name: string) => Promise<ParsedDoc> };
@@ -98,12 +99,17 @@ function paged(title: string, parts: string[]): ParsedDoc {
 
 const MAX_ZIP = 300 * 1024 * 1024;
 
-async function unzipXml(file: Blob, name: string): Promise<Record<string, string>> {
+async function unzipXml(file: Blob, name: string, mediaSizes?: Map<string, number>): Promise<Record<string, string>> {
   if (file.size > MAX_ZIP) throw new ParseError(`${name} is over 300 MB. Save a copy without videos/large images, or as PDF.`);
   let entries: Record<string, Uint8Array>;
   try {
     entries = unzipSync(new Uint8Array(await file.arrayBuffer()), {
-      filter: (f) => /\.(xml|rels|opf|xhtml|html|htm|ncx)$/i.test(f.name),
+      filter: (f) => {
+        const wanted = /\.(xml|rels|opf|xhtml|html|htm|ncx)$/i.test(f.name);
+        // Pictures are never unpacked here; their sizes are enough to tell logos from content.
+        if (!wanted && mediaSizes && /\/media\//i.test(f.name)) mediaSizes.set(f.name, f.originalSize);
+        return wanted;
+      },
     });
   } catch {
     throw new ParseError(`${name} isn't a valid file (it may be damaged, or password-protected).`);
@@ -147,27 +153,92 @@ function drawingText(xml: string): string {
     .join("\n");
 }
 
-async function readPptx(file: Blob, name: string): Promise<ParsedDoc> {
-  const f = await unzipXml(file, name);
-  const pres = f["ppt/presentation.xml"];
-  if (!pres) throw new ParseError(`${name} doesn't look like a PowerPoint file.`);
+/** A slide with pictures and fewer body characters than this needs AI reading (a screenshot under a title). */
+export const PICTURE_SLIDE_MAX_CHARS = 40;
+const RASTER = /\.(png|jpe?g|gif|webp|bmp)$/i;
+
+/** Slide part paths in presentation order. */
+function pptxSlidePaths(f: Record<string, string>): string[] {
   const presRels = rels(f["ppt/_rels/presentation.xml.rels"], "ppt");
   // Slide order comes from the presentation's slide list (file names can be out of order).
-  let slides = [...pres.matchAll(/<p:sldId\b[^>]*>/g)].map((m) => presRels.get(attr(m[0], "r:id"))).filter((p): p is string => !!p && !!f[p]);
-  if (!slides.length)
-    slides = Object.keys(f)
-      .filter((k) => /^ppt\/slides\/slide\d+\.xml$/.test(k))
-      .sort((a, b) => Number(a.match(/\d+/)![0]) - Number(b.match(/\d+/)![0]));
-  const parts = slides.map((path) => {
-    const body = drawingText(f[path]);
+  const slides = [...(f["ppt/presentation.xml"] ?? "").matchAll(/<p:sldId\b[^>]*>/g)].map((m) => presRels.get(attr(m[0], "r:id"))).filter((p): p is string => !!p && !!f[p]);
+  if (slides.length) return slides;
+  return Object.keys(f)
+    .filter((k) => /^ppt\/slides\/slide\d+\.xml$/.test(k))
+    .sort((a, b) => Number(a.match(/\d+/)![0]) - Number(b.match(/\d+/)![0]));
+}
+
+const relsPathOf = (path: string) => `${path.slice(0, path.lastIndexOf("/"))}/_rels/${path.slice(path.lastIndexOf("/") + 1)}.rels`;
+
+/** A slide's text: body, then its speaker notes. */
+function slidePart(f: Record<string, string>, path: string): string {
+  const body = drawingText(f[path]);
+  const dir = path.slice(0, path.lastIndexOf("/"));
+  const notesPath = [...rels(f[relsPathOf(path)], dir).values()].find((t) => t.includes("notesSlides/"));
+  // Notes slides repeat the slide number placeholder; keep only real note paragraphs.
+  const notes = notesPath && f[notesPath] ? drawingText(f[notesPath]).split("\n").filter((l) => !/^\d+$/.test(l.trim())).join("\n") : "";
+  return notes.trim() ? `${body}\n\nSpeaker notes:\n${notes}` : body;
+}
+
+/**
+ * THE classifier for "this slide is a picture and needs AI reading", shared by parsing (so the deck is flagged) and the
+ * Read panel (so its count and buttons agree). It looks at the slide's own pictures only (not its background), found by
+ * image relationship, de-duplicated, and uses file sizes from the zip directory (nothing is unpacked or decoded):
+ *  - a picture counts if it is a raster of at least 8 KB that is not layout artwork repeated on most slides;
+ *  - a picture in a format we can't open (EMF, WMF, TIFF, SVG without a PNG fallback) counts too (it reads as "[Figure not readable]");
+ *  - a slide's lone small picture counts when it is not repeated;
+ *  - and the slide must have fewer than 40 characters of body text (title and notes don't count).
+ * A deck with no text anywhere whose pictures are all small or repeated still has its picture slides flagged.
+ */
+export function classifyDeck(f: Record<string, string>, sizes: Map<string, number>): { paths: string[]; parts: string[]; needsAi: boolean[] } {
+  const paths = pptxSlidePaths(f);
+  const parts = paths.map((p) => slidePart(f, p));
+  const info = paths.map((path) => {
+    const xml = f[path].replace(/<p:bg\b[\s\S]*?<\/p:bg>/g, "");
     const dir = path.slice(0, path.lastIndexOf("/"));
-    const file = path.slice(path.lastIndexOf("/") + 1);
-    const notesPath = [...rels(f[`${dir}/_rels/${file}.rels`], dir).values()].find((t) => t.includes("notesSlides/"));
-    // Notes slides repeat the slide number placeholder; keep only real note paragraphs.
-    const notes = notesPath && f[notesPath] ? drawingText(f[notesPath]).split("\n").filter((l) => !/^\d+$/.test(l.trim())).join("\n") : "";
-    return notes.trim() ? `${body}\n\nSpeaker notes:\n${notes}` : body;
+    const used = new Set([...xml.matchAll(/<a:blip\b[^>]*r:embed="([^"]*)"/g)].map((m) => decode(m[1])));
+    const targets = new Set<string>();
+    for (const m of (f[relsPathOf(path)] ?? "").matchAll(/<Relationship\b[^>]*>/g)) {
+      if (!/\/image$/.test(attr(m[0], "Type")) || !used.has(attr(m[0], "Id")) || /TargetMode="External"/.test(m[0])) continue;
+      const t = resolve(dir, attr(m[0], "Target"));
+      if (sizes.has(t)) targets.add(t);
+    }
+    const noTitle = xml.replace(/<p:sp\b[\s\S]*?<\/p:sp>/g, (m) => (/<p:ph\b[^>]*type="(?:title|ctrTitle)"/.test(m) ? "" : m));
+    return { targets, body: drawingText(noTitle).replace(/\s+/g, "").length };
   });
-  return paged(coreTitle(f) || stem(name), parts);
+  const seen = new Map<string, number>();
+  for (const i of info) for (const t of i.targets) seen.set(t, (seen.get(t) ?? 0) + 1);
+  const repeated = (t: string) => info.length >= 4 && (seen.get(t) ?? 0) > info.length / 2;
+  const needsAi = info.map(({ targets, body }) => {
+    if (body >= PICTURE_SLIDE_MAX_CHARS) return false;
+    const list = [...targets];
+    const content = list.some((t) => !RASTER.test(t) || ((sizes.get(t) ?? 0) >= MIN_PICTURE_BYTES && !repeated(t)));
+    return content || (list.length === 1 && !repeated(list[0]));
+  });
+  if (!needsAi.some(Boolean) && !parts.some((p) => p.trim())) return { paths, parts, needsAi: info.map((i) => i.targets.size > 0) };
+  return { paths, parts, needsAi };
+}
+
+/** Light scan of a kept deck: which slides (1-based) need AI reading. Reads only the zip directory and XML parts. */
+export async function scanPptx(file: Blob, name = "the file"): Promise<number[]> {
+  const sizes = new Map<string, number>();
+  const f = await unzipXml(file, name, sizes);
+  if (!f["ppt/presentation.xml"]) throw new ParseError(`${name} doesn't look like a PowerPoint file.`);
+  return classifyDeck(f, sizes).needsAi.flatMap((b, i) => (b ? [i + 1] : []));
+}
+
+async function readPptx(file: Blob, name: string): Promise<ParsedDoc> {
+  const sizes = new Map<string, number>();
+  const f = await unzipXml(file, name, sizes);
+  if (!f["ppt/presentation.xml"]) throw new ParseError(`${name} doesn't look like a PowerPoint file.`);
+  const { parts, needsAi } = classifyDeck(f, sizes);
+  const title = coreTitle(f) || stem(name);
+  if (!parts.some((p) => p.trim()) && needsAi.some(Boolean)) {
+    // Every slide is a picture: accepted like a scanned PDF (empty pages, flagged), read with AI in Read mode.
+    return { title, text: "", pages: parts.map((_, i) => ({ page: i + 1, start: 0, end: 0 })), noText: true };
+  }
+  const doc = paged(title, parts);
+  return needsAi.some(Boolean) ? { ...doc, noText: true } : doc;
 }
 
 // ---------------------------------------------------------------- Word

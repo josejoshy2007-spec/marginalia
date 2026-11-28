@@ -22,6 +22,7 @@
     "test:ib": "tsx scripts/ib-test.mts",
     "test:cite": "tsx scripts/cite-narrow-test.mts",
     "test:aipages": "tsx scripts/aipages-test.mts",
+    "test:slides-ai": "tsx scripts/slides-ai-test.mts",
     "test:paste": "tsx scripts/paste-test.mts",
     "test:nav": "tsx scripts/nav-test.mts",
     "test:timer": "tsx scripts/timer-test.mts",
@@ -29,7 +30,7 @@
     "test:office-view": "tsx scripts/office-view-test.mts",
     "typecheck": "next typegen && tsc --noEmit",
     "calibrate": "tsx scripts/calibrate.mts",
-    "test:all": "npm run typecheck && npm run test:sync && npm run test:theme && npm run test:style -- --components && npm run test:search && npm run test:reuse && npm run test:cards && npm run test:providers && npm run test:answers && npm run test:reflow && npm run test:ib && npm run test:cite && npm run test:aipages && npm run test:paste && npm run test:nav && npm run test:original && npm run test:office-view &&npm run test:youtube && npm run test:timer"
+    "test:all": "npm run typecheck && npm run test:sync && npm run test:theme && npm run test:style -- --components && npm run test:search && npm run test:reuse && npm run test:cards && npm run test:providers && npm run test:answers && npm run test:reflow && npm run test:ib && npm run test:cite && npm run test:aipages && npm run test:slides-ai && npm run test:paste && npm run test:nav && npm run test:original && npm run test:office-view &&npm run test:youtube && npm run test:timer"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

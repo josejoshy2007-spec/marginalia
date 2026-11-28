@@ -49,9 +49,10 @@ import { makeThumb } from "../photos";
 import { exportAll, importAll } from "./backup";
 import type { Thread } from "../threads";
 import type { ThreadRow } from "./db";
-import { formatOf, unsupportedReason } from "./formats";
-import { applyAiReading, indexSpans } from "./aipages";
-import { readPageImage, renderPageJpeg } from "./pageread";
+import { formatOf, scanPptx, unsupportedReason } from "./formats";
+import { applyAiReading, BLANK_PAGE, indexSpans } from "./aipages";
+import { base64Bytes, MAX_REQUEST_BYTES, pickPictures, readPageImage, readSlideBatch, renderPageJpeg, shrinkPicture, SLIDES_PER_REQUEST, UNREADABLE_FIGURE, type SlideInput } from "./pageread";
+import { viewPptxChecked, type Img as DeckImg, type Slide as DeckSlide } from "../office-view";
 
 // ---------------------------------------------------------------- jobs
 
@@ -523,6 +524,7 @@ async function deleteSourceRows(id: number) {
   await db.blobs.delete(uploadKey(id));
   await db.blobs.delete(pdfKey(id));
   await db.blobs.delete(origKey(id));
+  needsCache.delete(id);
   await db.sources.delete(id);
   forgetSource(id);
   forgetStats(id);
@@ -532,6 +534,8 @@ async function deleteSourceRows(id: number) {
 
 /** Most pages one "Read pages..." run takes (each page is one vision call). */
 export const MAX_AI_PAGES_PER_RUN = 30;
+/** Most slides one run takes (about 8 slides per vision call, so a whole deck is one run). */
+export const MAX_AI_SLIDES_PER_RUN = 60;
 
 type PageReadJob = PageReadStatus & { replace: boolean };
 
@@ -542,6 +546,10 @@ const pageReadHooks: {
   open?: (blob: Blob) => Promise<{ doc: any; task: { destroy: () => Promise<void> } }>;
   render?: (doc: any, page: number) => Promise<Blob>;
   read?: (jpeg: Blob) => Promise<string>;
+  /** Slides: the deck reader, the picture shrinker and the batched vision call. */
+  slides?: (bytes: Uint8Array) => DeckSlide[] | null;
+  decode?: (img: { mime: string; data: Uint8Array }) => Promise<{ mime: string; data: string } | null>;
+  readSlides?: (batch: SlideInput[]) => Promise<Map<number, string>>;
 } = {};
 
 const pageReadChanged = (sourceId: number) => {
@@ -558,6 +566,149 @@ async function storeAiReading(sourceId: number, page: number, reading: string) {
   return res;
 }
 
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The pictures of a slide, in slide order: what the positioned rebuild placed (layout pictures included), else the ones it names. */
+const slidePictures = (sl: DeckSlide): DeckImg[] => {
+  const placed = (sl.els ?? []).flatMap((e) => (e.t === "img" ? [e.img] : []));
+  return placed.length ? placed : sl.images;
+};
+
+const TOO_BIG_DECK = "This file is too large to read with AI (its slides or pictures are over the 150 MB size limit). Save a copy with smaller pictures and attach that.";
+const PPTX_NAME = /\.(pptx|ppsx|potx)$/i;
+
+/** The slides of a kept .pptx, or an honest reason it can't be read. */
+async function deckSlides(blob: Blob): Promise<DeckSlide[]> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  if (pageReadHooks.slides) {
+    const hooked = pageReadHooks.slides(bytes);
+    if (hooked) return hooked;
+  } else {
+    const r = viewPptxChecked(bytes);
+    if (r.tooBig) throw new Error(TOO_BIG_DECK);
+    if (r.slides) return r.slides;
+  }
+  throw new Error("Only PowerPoint (.pptx) slides can be read with AI. Save the deck as .pptx and attach that.");
+}
+
+/** How many slides carry each picture (a layout's artwork sits on most of them and isn't content). */
+function deckRepeats(slides: DeckSlide[]): Map<Uint8Array, number> {
+  const repeats = new Map<Uint8Array, number>();
+  for (const sl of slides) for (const d of new Set(slidePictures(sl).map((im) => im.data))) repeats.set(d, (repeats.get(d) ?? 0) + 1);
+  return repeats;
+}
+
+/** Picture slides per source, from a light scan of the kept file (no rebuild). Keyed by file name + size; dropped when the original changes. */
+const needsCache = new Map<number, { key: string; needs: number[] }>();
+
+/** Slides (1-based) that are mostly a picture, ignoring AI readings. Null when the kept file can't be scanned. */
+async function pictureSlides(id: number): Promise<number[] | null> {
+  const orig = await db.blobs.get(origKey(id));
+  if (!orig || !PPTX_NAME.test(orig.name ?? "")) return null;
+  const key = `${orig.name}:${orig.blob.size}`;
+  const hit = needsCache.get(id);
+  if (hit?.key === key) return hit.needs;
+  const needs = await scanPptx(orig.blob, orig.name ?? undefined);
+  needsCache.set(id, { key, needs });
+  return needs;
+}
+
+/**
+ * Read slides with AI, about 8 per request: each slide's pictures (shrunk to 1600 px JPEGs) and any text it has go in
+ * one request that returns a transcription per slide. A slide is stored (and leaves `pending`) as soon as its reading
+ * arrives; a failed request leaves its slides pending for "Try again".
+ */
+async function runSlideRead(sourceId: number, job: PageReadJob) {
+  const orig = await db.blobs.get(origKey(sourceId));
+  if (!orig) throw new Error("This device doesn't have the original slides file. Open the Original view and attach it first.");
+  const slides = await deckSlides(orig.blob);
+  const first = await db.sources.get(sourceId);
+  if (first && slides.length !== first.pages.length)
+    throw new Error(`That file has ${slides.length} slides but this source has ${first.pages.length}. Attach the same file you added.`);
+  const repeats = deckRepeats(slides);
+
+  /** `tooLarge`: every picture of the slide was dropped for the file's size limits, so there is nothing to read. */
+  type Prepared = { n: number; input: SlideInput; tooLarge: boolean };
+  const prepared = new Map<number, Prepared>();
+  const prepare = async (n: number, text: string): Promise<Prepared> => {
+    const sl = slides[n - 1];
+    const images: SlideInput["images"] = [];
+    let unreadable = (sl.skipped ?? 0) + (sl.dropped ?? 0);
+    for (const im of pickPictures(slidePictures(sl), repeats, slides.length)) {
+      const d = await (pageReadHooks.decode ?? shrinkPicture)(im);
+      if (d) images.push(d);
+      else unreadable++;
+    }
+    return { n, input: { n, text, images, unreadable }, tooLarge: !images.length && (sl.dropped ?? 0) > 0 };
+  };
+  const finish = async (n: number, reading: string, unreadable: number) => {
+    await storeAiReading(sourceId, n, unreadable ? `${reading === BLANK_PAGE ? "" : reading + "\n\n"}${UNREADABLE_FIGURE}` : reading);
+    job.pending = job.pending.filter((x) => x !== n);
+    job.done++;
+    prepared.delete(n);
+    pageReadChanged(sourceId);
+  };
+
+  const estimate = Math.max(1, Math.ceil(job.total / SLIDES_PER_REQUEST));
+  let requests = 0;
+  const blocked = new Set<number>(); // slides whose pictures were too large: they stay pending, the rest carry on
+  while (job.pending.some((n) => !blocked.has(n))) {
+    const src = await db.sources.get(sourceId);
+    if (!src) return; // deleted meanwhile
+    const batch: Prepared[] = [];
+    let bytes = 0;
+    for (const n of [...job.pending]) {
+      if (batch.length >= SLIDES_PER_REQUEST) break;
+      if (blocked.has(n)) continue;
+      if (!job.replace && src.ai_pages?.some((p) => p.page === n)) {
+        job.pending = job.pending.filter((x) => x !== n);
+        job.done++;
+        continue;
+      }
+      const span = src.pages[n - 1];
+      const text = span ? src.text.slice(span.start, span.end) : "";
+      const p = prepared.get(n) ?? (await prepare(n, text));
+      prepared.set(n, p);
+      if (p.tooLarge) {
+        blocked.add(n);
+        continue;
+      }
+      if (!p.input.images.length) {
+        // Nothing to look at: no request. Keep any text the slide has, and say if its pictures couldn't be opened.
+        await finish(n, text.trim() || BLANK_PAGE, p.input.unreadable);
+        continue;
+      }
+      const size = p.input.images.reduce((a, im) => a + base64Bytes(im.data), 0);
+      if (batch.length && bytes + size > MAX_REQUEST_BYTES) break;
+      batch.push(p);
+      bytes += size;
+    }
+    if (!batch.length) continue;
+    if (requests > 0) await sleepMs(pageReadHooks.readSlides ? 0 : 1500); // a breath between requests; the AI pacer does the rest
+    requests++;
+    const a = batch[0].n;
+    const b = batch[batch.length - 1].n;
+    job.stage = `Reading slides ${a === b ? a : `${a}–${b}`} (${requests}/${Math.max(estimate, requests)})`;
+    pageReadChanged(sourceId);
+    const got = await patiently(() => (pageReadHooks.readSlides ?? readSlideBatch)(batch.map((x) => x.input)), 2, () => {
+      job.stage = "Waiting for the AI's per-minute limit";
+      pageReadChanged(sourceId);
+    });
+    if (!(await db.sources.get(sourceId))) return;
+    const missing: number[] = [];
+    for (const x of batch) {
+      const reading = got.get(x.n);
+      if (reading == null) missing.push(x.n);
+      else await finish(x.n, reading, x.input.unreadable);
+    }
+    if (missing.length) throw new Error(`The AI skipped slide${missing.length > 1 ? "s" : ""} ${missing.join(", ")}. Try again.`);
+  }
+  if (blocked.size) {
+    const list = [...blocked].sort((a, b) => a - b).join(", ");
+    throw new Error(`This slide's pictures are too large to read (slide${blocked.size > 1 ? "s" : ""} ${list}; the file is over the 150 MB limit). Save a copy with smaller pictures and attach that.`);
+  }
+}
+
 function startPageRead(sourceId: number, pages: number[], replace: boolean): PageReadStatus {
   if (pageReads.get(sourceId)?.state === "running") throw new Error("Pages of this source are already being read.");
   const job: PageReadJob = { state: "running", pending: pages, total: pages.length, done: 0, stage: "Queued", error: null, replace };
@@ -566,6 +717,12 @@ function startPageRead(sourceId: number, pages: number[], replace: boolean): Pag
   genQueue.push(async () => {
     let task: { destroy: () => Promise<void> } | null = null;
     try {
+      if ((await db.sources.get(sourceId))?.kind === "slides") {
+        await runSlideRead(sourceId, job);
+        job.state = "done";
+        job.stage = "Done";
+        return;
+      }
       const blob = (await db.blobs.get(pdfKey(sourceId)))?.blob;
       if (!blob) throw new Error("This device doesn't have the original PDF. Attach it in Page view first.");
       const opened = await (pageReadHooks.open ?? openPdf)(blob);
@@ -1156,14 +1313,27 @@ export const localApi = {
    */
   readPagesWithAI: async (id: number, from: number, to: number = from, opts: { replace?: boolean } = {}): Promise<PageReadStatus> => {
     const src = await need(db.sources.get(id), "Source not found");
-    if (src.kind !== "pdf") throw new Error("Only PDFs can be read page by page.");
+    const slides = src.kind === "slides";
+    if (src.kind !== "pdf" && !slides) throw new Error("Only PDFs and slides can be read with AI.");
     if (src.status !== "ready") throw new Error("Wait until the source is ready");
-    if (!(await db.blobs.get(pdfKey(id)))) throw new Error("This device doesn't have the original PDF. Attach it in Page view first.");
+    if (slides) {
+      if (!(await db.blobs.get(origKey(id)))) throw new Error("This device doesn't have the original slides file. Open the Original view and attach it first.");
+    } else if (!(await db.blobs.get(pdfKey(id)))) throw new Error("This device doesn't have the original PDF. Attach it in Page view first.");
+    const word = slides ? "slides" : "pages";
     const a = Math.max(1, Math.min(from, to));
     const b = Math.min(src.pages.length, Math.max(from, to));
-    if (!Number.isFinite(a) || !Number.isFinite(b) || a > b) throw new Error(`Pick pages between 1 and ${src.pages.length}.`);
-    if (b - a + 1 > MAX_AI_PAGES_PER_RUN) throw new Error(`Up to ${MAX_AI_PAGES_PER_RUN} pages at a time.`);
-    return startPageRead(id, Array.from({ length: b - a + 1 }, (_, i) => a + i), opts.replace ?? a === b);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a > b) throw new Error(`Pick ${word} between 1 and ${src.pages.length}.`);
+    const cap = slides ? MAX_AI_SLIDES_PER_RUN : MAX_AI_PAGES_PER_RUN;
+    if (b - a + 1 > cap) throw new Error(`Up to ${cap} ${word} at a time.`);
+    const replace = opts.replace ?? a === b;
+    let list = Array.from({ length: b - a + 1 }, (_, i) => a + i);
+    // A range over a deck reads the picture slides that have no reading yet; text slides keep their text (the single-slide re-read overrides).
+    if (slides && !replace) {
+      const needs = new Set((await pictureSlides(id)) ?? []);
+      list = list.filter((n) => needs.has(n) && !src.ai_pages?.some((p) => p.page === n));
+      if (!list.length) throw new Error("Every picture slide in that range has already been read with AI.");
+    }
+    return startPageRead(id, list, replace);
   },
   /** Progress of the latest page-reading run for a source (null if none since the app opened). */
   pageReadStatus: async (id: number): Promise<PageReadStatus | null> => pageReadOut(pageReads.get(id)),
@@ -1238,8 +1408,35 @@ export const localApi = {
   },
   /** Attach the original file for a source added earlier or synced from another device. */
   attachOriginal: async (id: number, file: Blob): Promise<void> => {
-    await need(db.sources.get(id), "Source not found");
-    await db.blobs.put({ key: origKey(id), blob: file, name: (file as File).name });
+    const src = await need(db.sources.get(id), "Source not found");
+    const name = (file as File).name ?? "";
+    if (src.kind === "slides") {
+      if (PPTX_NAME.test(name)) {
+        // Same check as attachPdf: the deck has to be the one this source was made from.
+        const r = viewPptxChecked(new Uint8Array(await file.arrayBuffer()));
+        if (!r.tooBig) {
+          if (!r.slides) throw new Error(`${name} doesn't look like a PowerPoint file (it may be damaged or password-protected).`);
+          if (src.pages.length && r.slides.length !== src.pages.length)
+            throw new Error(`That file has ${r.slides.length} slides but this source has ${src.pages.length}. Pick the same file you added.`);
+        }
+      } else if (!/\.odp$/i.test(name)) {
+        throw new Error(`${name || "That file"} isn't a PowerPoint (.pptx) file. Pick the deck you added, or save it as .pptx first.`);
+      }
+    }
+    await db.blobs.put({ key: origKey(id), blob: file, name });
+    needsCache.delete(id);
+    if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("marginalia:original-changed", { detail: { sourceId: id } }));
+  },
+  /** Slides that are mostly pictures and have no AI reading yet (null when unknown: not a deck, or no .pptx kept on this device). */
+  slidesNeedingAI: async (id: number): Promise<number[] | null> => {
+    const src = await db.sources.get(id);
+    if (!src || src.kind !== "slides" || !src.no_text_layer) return null; // a text deck has nothing to scan
+    try {
+      const needs = await pictureSlides(id);
+      return needs && needs.filter((n) => !src.ai_pages?.some((p) => p.page === n));
+    } catch {
+      return null;
+    }
   },
 
   artifacts: async (subjectId: number, kind?: ArtifactKind): Promise<ArtifactSummary[]> => {

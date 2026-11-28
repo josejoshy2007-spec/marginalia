@@ -404,6 +404,7 @@ const serverApi = {
     throw new Error("The original view is only available in the phone and web app.");
   },
   /** Reading pages with AI is on-device only. */
+  slidesNeedingAI: async (_id: number): Promise<number[] | null> => null,
   hasPdf: async (_id: number): Promise<boolean> => false,
   readPagesWithAI: async (_id: number, _from: number, _to?: number, _opts?: { replace?: boolean }): Promise<PageReadStatus> => {
     throw new Error("Reading pages with AI is only available in the phone and web app.");

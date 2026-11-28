@@ -100,25 +100,58 @@ export default function ReadMode(p: Props) {
     setReadErr(null);
     setReadStatus(null);
   }, [sourceId]);
+  const canAiRead = source?.kind === "pdf" || source?.kind === "slides";
+  // Slides: AI reading needs the original .pptx (not .odp) on this device; `needs` = picture slides still unread (null = unknown).
+  const [needs, setNeeds] = useState<number[] | null>(null);
+  const aiRequest = useRef(0); // only the latest request may set state: switching sources must not show the old one's result
+  const needsScan = !!source?.no_text_layer; // a deck with real text has nothing to scan
+  const loadAiState = useCallback(async () => {
+    if (sourceId == null) return;
+    const mine = ++aiRequest.current;
+    const fresh = () => mine === aiRequest.current;
+    if (source?.kind === "slides") {
+      const o = await api.sourceOriginal(sourceId).catch(() => null);
+      const usable = !!o && /\.(pptx|ppsx|potx)$/i.test(o.name);
+      const list = usable && needsScan ? await api.slidesNeedingAI(sourceId).catch(() => null) : null;
+      if (!fresh()) return;
+      setHasPdf(usable);
+      setNeeds(list);
+    } else {
+      const has = await api.hasPdf(sourceId).catch(() => false);
+      if (fresh()) setHasPdf(has);
+    }
+  }, [sourceId, source?.kind, needsScan]);
   useEffect(() => {
+    aiRequest.current++; // drops any answer still on its way for the previous source
     setHasPdf(false);
-    if (sourceId == null || source?.kind !== "pdf") return;
+    setNeeds(null);
+    if (sourceId == null || !canAiRead) return;
     let live = true;
-    api.hasPdf(sourceId).then((v) => live && setHasPdf(v)).catch(() => {});
+    void loadAiState();
     api.pageReadStatus(sourceId).then((v) => live && setReadStatus(v)).catch(() => {});
     return () => {
       live = false;
     };
-  }, [sourceId, source?.kind, pdf]);
+  }, [sourceId, source?.kind, pdf, canAiRead, loadAiState]);
+  // The original was attached or replaced somewhere else (the Original view, the banner).
+  useEffect(() => {
+    if (sourceId == null || !canAiRead) return;
+    const onOrig = (e: Event) => {
+      if ((e as CustomEvent).detail?.sourceId === sourceId) void loadAiState();
+    };
+    window.addEventListener("marginalia:original-changed", onOrig);
+    return () => window.removeEventListener("marginalia:original-changed", onOrig);
+  }, [sourceId, canAiRead, loadAiState]);
   // Each finished page changes the text: fetch it again and keep the status current.
   useEffect(() => {
-    if (sourceId == null || source?.kind !== "pdf") return;
+    if (sourceId == null || !canAiRead) return;
     let live = true;
     const onRead = async (e: Event) => {
       if ((e as CustomEvent).detail?.sourceId !== sourceId) return;
       const [st, d] = await Promise.all([api.pageReadStatus(sourceId), api.source(sourceId).catch(() => null)]);
       if (!live) return;
       setReadStatus(st);
+      if (st?.state !== "running") void loadAiState();
       if (d && d.status === "ready") {
         detailCache.set(d.id, d);
         setDetail(d);
@@ -129,7 +162,7 @@ export default function ReadMode(p: Props) {
       live = false;
       window.removeEventListener("marginalia:page-read", onRead);
     };
-  }, [sourceId, source?.kind]);
+  }, [sourceId, canAiRead, loadAiState]);
   const reading = readStatus?.state === "running";
   const startRead = useCallback(
     async (from: number, to: number, replace: boolean) => {
@@ -387,10 +420,19 @@ export default function ReadMode(p: Props) {
             />
           </div>
         )}
-        {source.kind === "pdf" && detail && (
+        {(source.kind === "pdf" || source.kind === "slides") && detail && (
           <PageReadPanel
             detail={detail}
             hasPdf={hasPdf}
+            needs={needs}
+            onAttach={async (f) => {
+              setReadErr(null);
+              try {
+                await api.attachOriginal(detail.id, f);
+              } catch (e) {
+                setReadErr((e as Error).message);
+              }
+            }}
             status={readStatus}
             error={readErr}
             onRead={(from, to) => startRead(from, to, false)}
@@ -431,7 +473,7 @@ export default function ReadMode(p: Props) {
             ranges={ranges}
             label={pageLabel(detail.kind).short}
             onReflow={onReflow}
-            canRead={hasPdf && detail.kind === "pdf"}
+            canRead={hasPdf && (detail.kind === "pdf" || detail.kind === "slides")}
             reading={reading}
             showOriginal={showOriginal}
             onReadPage={(pg) => startRead(pg, pg, true)}
@@ -611,7 +653,7 @@ const DocumentText = memo(function DocumentText({
                     </button>
                   </span>
                 )}
-                {canRead && <ReadPageButton exists={!!sec.ai} busy={reading} onRead={() => onReadPage(sec.page!)} />}
+                {canRead && <ReadPageButton exists={!!sec.ai} busy={reading} noun={label === "slide" ? "slide" : "page"} onRead={() => onReadPage(sec.page!)} />}
                 <span aria-hidden className="h-px min-w-6 flex-1 bg-line" />
               </div>
             )}
@@ -622,7 +664,7 @@ const DocumentText = memo(function DocumentText({
             )}
             {blank && sec.page !== undefined && (
               <p data-pg={sec.page} className="mb-5 font-sans text-xs italic text-muted">
-                {canRead ? "No text on this page yet." : "No text on this page."}
+                {canRead ? `No text on this ${label === "slide" ? "slide" : "page"} yet.` : `No text on this ${label === "slide" ? "slide" : "page"}.`}
               </p>
             )}
             {useAi
@@ -669,19 +711,22 @@ const AiBlock = memo(function AiBlock({ text, block, ranges, page }: { text: str
   );
 });
 
-function ReadPageButton({ exists, busy, onRead }: { exists: boolean; busy: boolean; onRead: () => void }) {
+function ReadPageButton({ exists, busy, onRead, noun = "page" }: { exists: boolean; busy: boolean; onRead: () => void; noun?: string }) {
   return (
     <button
       type="button"
       disabled={busy}
       onClick={onRead}
-      title="Sends this page to Gemini as an image to read its equations, tables and figures. Uses AI quota."
+      title={`Sends this ${noun} to Gemini as an image to read its equations, tables and figures. Uses AI quota.`}
       className="border border-line px-2 py-0.5 text-[11px] text-ink hover:border-accent disabled:cursor-not-allowed disabled:opacity-50"
     >
-      {exists ? "Read this page again with AI" : "Read this page with AI"}
+      {exists ? `Read this ${noun} again with AI` : `Read this ${noun} with AI`}
     </button>
   );
 }
+
+/** Most slides one "Read slides with AI" run takes (the engine enforces the same cap). */
+const MAX_SLIDES_PER_RUN = 60;
 
 /** The scanned-PDF note and the "Read pages with AI" range control, plus progress and Try again for a run. */
 function PageReadPanel({
@@ -691,30 +736,91 @@ function PageReadPanel({
   error,
   onRead,
   onRetry,
+  onAttach,
+  needs,
 }: {
   detail: SourceDetail;
   hasPdf: boolean;
+  onAttach: (file: File) => void;
+  needs: number[] | null;
   status: PageReadStatus | null;
   error: string | null;
   onRead: (from: number, to: number) => void;
   onRetry: () => void;
 }) {
   const n = detail.pages.length;
+  const slides = detail.kind === "slides";
+  const cap = slides ? MAX_SLIDES_PER_RUN : 30;
+  const word = slides ? "slides" : "pages";
+  // Slides with no text of their own and no reading yet: what "Read all slides" sends (8 per request).
+  const unreadList = slides ? (needs ?? []) : [];
+  const unread = unreadList.length;
+  const requests = Math.ceil(unread / 8);
+  const firstUnread = unreadList[0] ?? 1;
   const [from, setFrom] = useState("1");
-  const [to, setTo] = useState(String(Math.min(n, 30)));
+  const [to, setTo] = useState(String(Math.min(n, cap)));
   const running = status?.state === "running";
   const clamp = (v: string) => Math.min(Math.max(1, Math.round(Number(v)) || 1), Math.max(1, n));
   const scanned = !!detail.no_text_layer;
   if (!scanned && !status && !error) return null;
+  if (slides && hasPdf && needs?.length === 0 && !status && !error) return null; // every picture slide is already read
   return (
     <div className="mt-3 space-y-2 border border-line bg-card px-3 py-2.5 text-sm" aria-label="Read pages with AI">
-      {scanned && (
+      {scanned && !slides && (
         <p className="text-muted">
           This PDF has no text layer. Read pages with AI to use them.
           {!hasPdf && " Attach the original file in Page view first."}
         </p>
       )}
-      {scanned && hasPdf && n > 0 && (
+      {scanned && slides && (unread > 0 || needs === null) && (
+        <p className="text-muted">
+          {unread > 0
+            ? `${unread === n ? "These slides are pictures" : `${unread} of these slides are pictures`}. Read them with AI to search, cite and make cards from them (about ${requests} AI ${requests === 1 ? "request" : "requests"}).`
+            : "Some of these slides are pictures. Read them with AI to search, cite and make cards from them."}
+          {!hasPdf && " This device doesn't have the original file: attach the same .pptx to read them."}
+        </p>
+      )}
+      {scanned && slides && !hasPdf && (
+        <label className="inline-block cursor-pointer border border-line px-3 py-1.5 text-sm text-ink hover:border-accent">
+          Attach the file
+          <input
+            type="file"
+            accept=".pptx,.ppsx,.potx"
+            className="sr-only"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) onAttach(f);
+            }}
+          />
+        </label>
+      )}
+      {slides && hasPdf && (error || status?.state === "failed") && (
+        <label className="inline-block cursor-pointer border border-line px-3 py-1.5 text-sm text-ink hover:border-accent">
+          Replace the file
+          <input
+            type="file"
+            accept=".pptx,.ppsx,.potx"
+            className="sr-only"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) onAttach(f);
+            }}
+          />
+        </label>
+      )}
+      {scanned && slides && hasPdf && unread > 0 && (
+        <button
+          type="button"
+          disabled={running}
+          onClick={() => onRead(firstUnread, Math.min(n, firstUnread + MAX_SLIDES_PER_RUN - 1))}
+          className="bg-accent px-3 py-1.5 text-sm font-medium text-on-accent hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Read all slides with AI
+        </button>
+      )}
+      {scanned && hasPdf && n > 0 && (!slides || unread > 0) && (
         <form
           className="flex flex-wrap items-center gap-2"
           onSubmit={(e) => {
@@ -722,28 +828,28 @@ function PageReadPanel({
             let a = clamp(from);
             let b = clamp(to);
             if (a > b) [a, b] = [b, a];
-            b = Math.min(b, a + 29);
+            b = Math.min(b, a + cap - 1);
             setFrom(String(a));
             setTo(String(b));
             onRead(a, b);
           }}
         >
           <label className="flex items-center gap-1.5 text-muted">
-            Pages
-            <input value={from} onChange={(e) => setFrom(e.target.value)} inputMode="numeric" className="field w-16" aria-label="First page" />
+            {slides ? "Slides" : "Pages"}
+            <input value={from} onChange={(e) => setFrom(e.target.value)} inputMode="numeric" className="field w-16" aria-label={slides ? "First slide" : "First page"} />
           </label>
           <label className="flex items-center gap-1.5 text-muted">
             to
-            <input value={to} onChange={(e) => setTo(e.target.value)} inputMode="numeric" className="field w-16" aria-label="Last page" />
+            <input value={to} onChange={(e) => setTo(e.target.value)} inputMode="numeric" className="field w-16" aria-label={slides ? "Last slide" : "Last page"} />
           </label>
           <button
             type="submit"
             disabled={running}
             className="bg-accent px-3 py-1.5 text-sm font-medium text-on-accent hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Read pages with AI
+            {slides ? "Read slides with AI" : "Read pages with AI"}
           </button>
-          <span className="text-xs text-muted">Up to 30 pages per run, one AI call each.</span>
+          <span className="text-xs text-muted">{slides ? `Up to ${cap} slides per run, about 8 per AI request.` : `Up to ${cap} pages per run, one AI call each.`}</span>
         </form>
       )}
       {running && status && (
@@ -764,7 +870,7 @@ function PageReadPanel({
           )}
         </p>
       )}
-      {status?.state === "done" && status.total > 0 && <p className="text-muted">Read {status.done} {status.done === 1 ? "page" : "pages"} with AI.</p>}
+      {status?.state === "done" && status.total > 0 && <p className="text-muted">Read {status.done} {status.done === 1 ? word.slice(0, -1) : word} with AI.</p>}
       {error && <p className="text-danger">{error}</p>}
     </div>
   );

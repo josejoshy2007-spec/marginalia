@@ -514,6 +514,11 @@ function SourceCard({ source: s, setSources, onSourcesChanged, onOpen }: Props &
         ) : (
           <>
             <p className="mt-1 text-xs text-muted">{meta}</p>
+            {s.status === "ready" && s.no_text_layer && s.kind === "slides" && !s.ai_page_count && (
+              <p className="mt-0.5 text-xs text-muted">
+                {s.chunk_count === 0 ? "Added. Its slides are pictures" : "Some slides are pictures"}: open it in Read to read them with AI.
+              </p>
+            )}
             {s.status === "ready" && s.search_progress != null && s.search_progress < 1 && (
               <p className="mt-0.5 text-xs text-muted">Improving search… {Math.round(s.search_progress * 100)}%</p>
             )}

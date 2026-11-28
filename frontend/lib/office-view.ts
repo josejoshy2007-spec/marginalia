@@ -54,8 +54,16 @@ function rels(xml: string | undefined, base: string): Map<string, string> {
 
 const MIME: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
 
+type Opened = { xml: Record<string, string>; bin: Record<string, Uint8Array>; /** Media left out because of the size limits. */ dropped: Set<string>; tooBig: boolean };
+
 function open(bytes: Uint8Array): { xml: Record<string, string>; bin: Record<string, Uint8Array> } | null {
+  const z = openZip(bytes);
+  return z && !z.tooBig ? z : null;
+}
+
+function openZip(bytes: Uint8Array): Opened | null {
   if (bytes.length > MAX_ZIP) return null;
+  const dropped = new Set<string>();
   let all: Record<string, Uint8Array>;
   let total = 0;
   let tooBig = false;
@@ -66,6 +74,7 @@ function open(bytes: Uint8Array): { xml: Record<string, string>; bin: Record<str
         if (!isXml && !/\/media\/[^/]+\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name)) return false;
         if (f.originalSize > LIMITS.entry || total + f.originalSize > LIMITS.total) {
           if (isXml) tooBig = true;
+          else dropped.add(f.name);
           return false;
         }
         total += f.originalSize;
@@ -75,12 +84,11 @@ function open(bytes: Uint8Array): { xml: Record<string, string>; bin: Record<str
   } catch {
     return null;
   }
-  if (tooBig) return null;
   const dec = new TextDecoder();
   const xml: Record<string, string> = {};
   const bin: Record<string, Uint8Array> = {};
   for (const [k, v] of Object.entries(all)) (/\.(xml|rels)$/i.test(k) ? (xml[k] = dec.decode(v)) : (bin[k] = v));
-  return { xml, bin };
+  return { xml, bin, dropped, tooBig };
 }
 
 function image(bin: Record<string, Uint8Array>, path: string | undefined): Img | null {
@@ -110,7 +118,7 @@ export type El = Box &
     | { t: "chart"; chart: ChartData }
   );
 /** `w`/`h` are the slide size in EMU; `els` is null when the positioned rebuild failed (draw title/paras/images instead). */
-export type Slide = { n: number; title: string; paras: string[]; images: Img[]; w: number; h: number; bg?: string; bgBase?: string; els: El[] | null };
+export type Slide = { n: number; title: string; paras: string[]; images: Img[]; /** Pictures in formats that can't be shown (EMF, WMF, TIFF...). */ skipped?: number; /** Pictures left out because the file is over the size limits. */ dropped?: number; w: number; h: number; bg?: string; bgBase?: string; els: El[] | null };
 
 type XNode = { n: string; a: Record<string, string>; c: XNode[]; t: string };
 
@@ -486,8 +494,19 @@ function addFrame(fr: XNode, w: Walk, box: (xf: Xf) => Box): void {
 
 /** Slides in presentation order, or null when the file isn't a readable .pptx. */
 export function viewPptx(bytes: Uint8Array): Slide[] | null {
-  const z = open(bytes);
-  const pres = z?.xml["ppt/presentation.xml"];
+  return viewPptxChecked(bytes).slides;
+}
+
+/** Like `viewPptx`, but says when the file was refused for its size (so callers can give an honest message). */
+export function viewPptxChecked(bytes: Uint8Array): { slides: Slide[] | null; tooBig: boolean } {
+  const z = openZip(bytes);
+  if (!z) return { slides: null, tooBig: bytes.length > MAX_ZIP };
+  if (z.tooBig) return { slides: null, tooBig: true };
+  return { slides: pptxSlides(z), tooBig: false };
+}
+
+function pptxSlides(z: Opened): Slide[] | null {
+  const pres = z.xml["ppt/presentation.xml"];
   if (!z || !pres) return null;
   const sz = /<p:sldSz\b[^>]*>/.exec(pres)?.[0] ?? "";
   const sw = Number(attr(sz, "cx"));
@@ -585,7 +604,17 @@ export function viewPptx(bytes: Uint8Array): Slide[] | null {
     } catch {
       els = null;
     }
-    return { n: i + 1, title, paras, images, w: W, h: H, bg: bg?.css, bgBase: bg?.base, els };
+    // Pictures in a format we can't show: image relationships only (not video/audio), each once, and not an SVG whose PNG fallback is shown.
+    const svgIds = new Set([...xml.matchAll(/<asvg:svgBlip\b[^>]*r:embed="([^"]*)"/g)].map((m) => decode(m[1])));
+    const odd = new Set<string>();
+    for (const m of (z.xml[`${path.slice(0, path.lastIndexOf("/"))}/_rels/${path.slice(path.lastIndexOf("/") + 1)}.rels`] ?? "").matchAll(/<Relationship\b[^>]*>/g)) {
+      if (!/\/image$/.test(attr(m[0], "Type")) || svgIds.has(attr(m[0], "Id")) || /TargetMode="External"/.test(m[0])) continue;
+      const t = resolve(path.slice(0, path.lastIndexOf("/")), attr(m[0], "Target"));
+      if (/\/media\//.test(t) && !/\.(png|jpe?g|gif|webp|bmp)$/i.test(t)) odd.add(t);
+    }
+    const skipped = odd.size;
+    const dropped = new Set([...rl.values()].filter((t) => z.dropped.has(t))).size;
+    return { n: i + 1, title, paras, images, ...(skipped ? { skipped } : {}), ...(dropped ? { dropped } : {}), w: W, h: H, bg: bg?.css, bgBase: bg?.base, els };
   });
 }
 
